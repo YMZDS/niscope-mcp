@@ -2,55 +2,69 @@
 
 AI 控制的示波器 — 通过 MCP (Model Context Protocol) 让 AI 助手直接操作 NI 示波器。
 
-支持 **NI PXIe-5160 / 5164 / 5110** 等设备。无需硬件？用 `--backend mock` 体验模拟波形。
+支持 **NI PXIe-5160 / 5164 / 5110** 等设备。仅支持 Windows + NI 硬件。
 
 ---
 
-## 快速安装
+## 📦 快速安装（两步）
+
+### 第 1 步：安装包 + 硬件驱动
 
 ```bash
 pip install -e .
+pip install "niscope-mcp[hardware]"    # 安装 NI-SCOPE 硬件驱动
 ```
 
 或 Windows 双击 `install.bat`。
 
-## 添加到 AI 助手
+> **首次启动会自动安装硬件驱动** — 直接运行 `python -m niscope_mcp`，如果缺少 `niscope` 包会自动 pip install。
 
-### Reasonix Desktop
+### 第 2 步：注册 MCP 服务器（❗ 必须）
+
+pip install **只是安装了 Python 包**，要让 AI 助手能调用示波器工具，还需要在 AI 助手的配置中注册 MCP 入口。
+
+#### Reasonix Desktop
 
 编辑 `C:\Users\<用户名>\.reasonix\config.json`，在 `mcp` 数组中添加：
 
 ```json
 {
   "mcp": [
-    "niscope=python -u -m niscope_mcp --backend direct"
+    "niscope=python -u -m niscope_mcp"
   ]
 }
 ```
 
-> 无硬件时改用 `--backend mock`。重启 Reasonix 生效。
-
-### Claude Desktop / Cursor
+#### Claude Desktop / Cursor
 
 ```json
 {
   "mcpServers": {
     "niscope": {
       "command": "python",
-      "args": ["-u", "-m", "niscope_mcp", "--backend", "direct"]
+      "args": ["-u", "-m", "niscope_mcp"]
     }
   }
 }
 ```
 
+**重启 AI 助手**后生效。
+
 ---
 
-## 后端选择
+## ⚠️ 安装经验（踩坑记录）
 
-| 后端 | 命令 | 需要 |
-|------|------|------|
-| `direct` | `--backend direct` | Windows + NI-SCOPE 驱动 + `niscope` 包 |
-| `mock` | `--backend mock` | 仅 Python 3.11+ |
+这是总结的安装流程和经验教训：
+
+| 步骤 | 做什么 | 容易忘的点 |
+|------|--------|-----------|
+| 1 | `pip install -e .` | 只装了 Python 包，**不是 MCP 配置** |
+| 2 | `pip install "niscope-mcp[hardware]"` | 安装 `niscope` 硬件驱动包，否则 direct 后端报 `ModuleNotFoundError` |
+| 3 | 编辑 `config.json` 添加 MCP 入口 | ❗ **这是最容易被忽视的一步** — 不注册 AI 助手根本不知道有这个 MCP |
+| 4 | 重启 AI 助手 | MCP 配置变更必须重启才能生效 |
+| 5 | 验证 | 启动后调用 `list_devices` 确认连接 |
+
+**关键教训**：pip install 和 MCP 注册是**两回事**，两步都要做。
 
 ---
 
@@ -65,7 +79,7 @@ pip install -e .
 | `configure_scope` | 配置通道/时基/触发 |
 | `auto_setup` | 自动设置（Autoset） |
 | `get_current_config` | 读取当前硬件配置 |
-| `help` | 参数参考 |
+| `help` | 参数参考 + 安装指引 |
 
 ---
 
@@ -163,26 +177,12 @@ configure_scope(
 
 | 问题 | 解决 |
 |------|------|
+| **niscope 包找不到** | 首次启动自动安装，或手动 `pip install "niscope-mcp[hardware]"` |
 | **设备标记 FAULTY** | PXI 机箱需要断电重启 (power cycle) |
 | **超时 (Timeout)** | 检查触发源和触发电平是否正确；尝试 `VAL_IMMEDIATE` 自由运行 |
 | **波形平直/零电压** | 检查探头连接和 `vertical_range` 设置 |
 | **波形噪声大** | 启用 `bandwidth_filter` 或增加 `min_sample_rate` |
-
----
-
-## 用于 Reasonix AI 助手
-
-克隆本仓库后在 Reasonix Desktop 中自动注册 skill：
-
-```json
-{
-  "mcp": [
-    "niscope=python -u -m niscope_mcp --backend direct"
-  ]
-}
-```
-
-项目自带 `.reasonix/skills/niscope-oscilloscope.md` playbook，AI 助手启动后自动获得示波器操作指南。
+| **AI 助手找不到示波器工具** | 检查 `config.json` 是否添加了 MCP 入口，重启 AI 助手 |
 
 ---
 
@@ -192,11 +192,11 @@ configure_scope(
 niscope-mcp/
 ├── niscope_mcp/          # Python 包
 │   ├── __init__.py
-│   ├── __main__.py        # MCP 服务器 + 输出渲染
+│   ├── __main__.py        # MCP 服务器 + 自安装逻辑
 │   └── backends/
+│       ├── __init__.py     # 后端工厂 + 懒加载 + 自安装
 │       ├── base.py         # 数据类型定义
-│       ├── direct.py       # NI-SCOPE 硬件后端
-│       └── mock.py         # 模拟后端（无需硬件）
+│       └── direct.py       # NI-SCOPE 硬件后端
 ├── niscope-mcp/server.py  # 兼容入口
 ├── pyproject.toml
 ├── MCP_OUTPUT_SPEC.md     # 输出格式规范

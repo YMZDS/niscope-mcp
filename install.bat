@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 echo ============================================
 echo  NI-SCOPE MCP Server — Installation
 echo ============================================
@@ -21,7 +22,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo Using: %PYTHON%
 echo.
 
-REM Install in development mode
+REM Step 1: Install the package
 echo [1/3] Installing niscope-mcp package...
 %PYTHON% -m pip install -e .
 if %ERRORLEVEL% NEQ 0 (
@@ -29,33 +30,46 @@ if %ERRORLEVEL% NEQ 0 (
     pause
     exit /b 1
 )
-
-REM Install hardware support (optional, only if NI drivers present)
-echo [2/3] Checking NI hardware support...
-%PYTHON% -c "import niscope" >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    echo   NI-SCOPE driver found — hardware support enabled.
-) else (
-    echo   NI-SCOPE driver not found. Use --backend mock for testing.
-    echo   Install NI-SCOPE driver from https://ni.com for hardware support.
-)
-
+echo   ✅ Package installed
 echo.
+
+REM Step 2: Install NI hardware driver (niscope)
+echo [2/3] Installing NI-SCOPE hardware driver (niscope)...
+%PYTHON% -m pip install "niscope-mcp[hardware]"
+if %ERRORLEVEL% EQU 0 (
+    echo   ✅ niscope hardware driver installed
+) else (
+    echo   ⚠️  niscope hardware driver install failed.
+    echo      Run manually: %PYTHON% -m pip install "niscope-mcp[hardware]"
+)
+echo.
+
+REM Step 3: Print config instructions
 echo [3/3] Installation complete!
 echo.
-echo To add to your MCP client config (Claude Desktop / Cursor / etc):
+echo ============================================
+echo  ✅ niscope-mcp package + hardware driver
+echo ============================================
 echo.
-echo {
-echo   "mcpServers": {
-echo     "niscope": {
-echo       "command": "%PYTHON%",
-echo       "args": ["-m", "niscope_mcp"]
-echo     }
-echo   }
-echo }
+echo  IMPORTANT: Add the following MCP entry to your
+echo  AI assistant config, then RESTART the assistant.
 echo.
-echo For mock/testing mode: add "--backend" and "mock" to args.
+echo  --- Reasonix Desktop (config.json) ---
+echo  "mcp": [
+echo    "niscope=%PYTHON% -u -m niscope_mcp"
+echo  ]
 echo.
-echo Run manually: %PYTHON% -m niscope_mcp --backend mock
+echo  --- Claude Desktop / Cursor ---
+echo  "mcpServers": {
+echo    "niscope": {
+echo      "command": "%PYTHON%",
+echo      "args": ["-u", "-m", "niscope_mcp"]
+echo    }
+echo  }
+echo.
+echo ============================================
+echo.
+echo  First start: %PYTHON% -m niscope_mcp
+echo  (auto-installs niscope if missing)
 echo.
 pause

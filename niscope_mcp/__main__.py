@@ -3,13 +3,21 @@
 NI-SCOPE MCP Server — AI-controlled oscilloscope for any MCP-compatible agent.
 
 Usage:
-    python -m niscope_mcp                      # default: direct backend
-    python -m niscope_mcp --backend mock       # simulated devices
-    niscope-mcp                                # after pip install
+    python -m niscope_mcp                       # direct NI hardware backend
+    niscope-mcp                                 # after pip install
 
-PORTABILITY: switch backends via --backend:
-    direct  = niscope Python package (requires NI driver on this machine)
-    mock    = synthetic waveforms (no hardware, works everywhere)
+REQUIRES:
+    - Windows with NI-SCOPE driver
+    - niscope Python package (auto-installed on first start if missing)
+
+The server auto-installs the required NI hardware driver (niscope package)
+when started for the first time. After installation, you MUST register this
+MCP server in your AI assistant's configuration (see printed instructions).
+
+Installation lifecycle:
+    1. Run `python -m niscope_mcp` — auto-installs niscope driver if missing
+    2. Add the printed MCP entry to your AI assistant config
+    3. Restart the AI assistant
 """
 
 from __future__ import annotations
@@ -623,122 +631,85 @@ def _format_auto_measure(m) -> TextContent:
     )
 
     # Header
-    sr_mhz = m.sample_rate_sps / 1e6
-    header = f"## CH{m.channel}  {m.signal_type.upper()}  {m.raw_samples} pts @ {sr_mhz:.1f} MS/s"
+    lines = [f"## 测量结果 — 通道 {m.channel}", ""]
+    # Parameter table
+    lines.append(_fmt_table(["参数", "值"], _build_param_rows(m)))
+    lines.append("")
+    # ASCII waveform
+    lines.append(ascii_preview)
+    # Signal inference
+    fp = _signal_fingerprint(m)
+    lines.append(f"\n### 信号分析\n- {m.channel}: {fp}")
 
-    # Parameter table (shared builder)
-    table = _fmt_table(["参数", "值"], _build_param_rows(m))
-
-    # Signal fingerprint one-liner
-    fp = _signal_fingerprint_short(m)
-
-    lines = [header, "", table, "", ascii_preview, "", f"🔍 {fp}"]
     return TextContent(type="text", text="\n".join(lines))
 
 
 async def _read_all(args: dict) -> list[TextContent]:
-    """Read all channels with chassis diagram + signal identification."""
-    r = args.get("resource_name", "")
+    r = args["resource_name"]
     timeout = float(args.get("timeout_seconds", 10.0))
+    b = backend()
+    b.open_device(r)
+    devices = b.scan_devices()
 
-    # ── Scan all devices ──
-    all_devs = backend().scan_devices()
-    lines: list[str] = []
+    if not devices:
+        return [TextContent(type="text", text="No devices found.")]
 
-    # Close any stale sessions to avoid NI driver conflicts
-    backend().close_all()
+    # ── Chassis map ──
+    lines = ["## 机箱结构", ""]
+    chassis_rows = []
+    for d in devices:
+        slot = d.resource_name.replace("PXI1Slot", "")
+        if "PXI1Slot" not in d.resource_name:
+            slot = d.resource_name
+        status = "✓" if not d.faulty else f"✗ FAULTY"
+        ch_str = f"{d.channels} CH"
+        chassis_rows.append([slot, d.resource_name, d.model, ch_str, status])
+    lines.append(_fmt_table(["插槽", "设备名", "型号", "通道", "状态"], chassis_rows))
 
-    # ── Build device results ──
-    dev_results: dict[str, dict] = {}
-    for d in all_devs:
-        name = d.resource_name
+    # ── Acquire ──
+    lines.append("", "## 测量结果", "")
+    header = ["CH", "类型", "频率", "Vpp", "占空比", "采样率"]
+    summary_rows = []
+    dev_results: dict[str, Any] = {}
+
+    for d in devices:
         if d.faulty:
-            dev_results[name] = {"status": "FAULTY", "reason": d.fault_reason, "model": d.model,
-                                 "channels": d.channels}
+            dev_results[d.resource_name] = {"status": "FAULTY", "reason": d.fault_reason}
             continue
         try:
-            backend().open_device(name)
-            backend().auto_setup(name)  # Auto-detect signal levels & timing
-            backend().commit(name)
-
+            b.auto_setup(d.resource_name)
+            b.commit(d.resource_name)
+            # Read both (or all) channels
             ch_data = {}
-            for ch in [str(i) for i in range(d.channels)]:
+            for i in range(min(d.channels, 2)):  # first 2 channels for speed
                 try:
-                    m = backend().auto_measure(name, ch, timeout * 0.5)
-                    ch_data[ch] = m
+                    m = b.auto_measure(d.resource_name, str(i), timeout)
+                    ch_data[str(i)] = m
+                    icon = "🔵" if i == 0 else "🟠"
+                    f_str = ""
+                    if m.signal_type == "periodic":
+                        f_mhz = m.frequency_hz / 1e6
+                        f_str = f"{f_mhz:.4f} MHz" if f_mhz >= 1 else f"{m.frequency_hz/1e3:.2f} kHz"
+                    elif m.signal_type == "dc":
+                        f_str = "DC"
+                    else:
+                        f_str = "noise"
+                    summary_rows.append([
+                        f"CH{i}", icon,
+                        f_str,
+                        f"{m.amplitude_vpp:.4f} V" if m.signal_type == "periodic" else f"{m.stats['peak_to_peak']:.4f} V",
+                        f"{m.duty_cycle_pct:.1f}%" if m.signal_type == "periodic" else "-",
+                        f"{m.sample_rate_sps/1e6:.0f}M",
+                    ])
                 except Exception as e:
-                    ch_data[ch] = {"error": str(e)[:80]}
-            dev_results[name] = {"status": "OK", "model": d.model, "channels": d.channels,
-                                 "ch_data": ch_data}
+                    ch_data[str(i)] = {"error": str(e)}
+                    summary_rows.append([f"CH{i}", "🔴", "ERROR", "-", "-", "-"])
+            dev_results[d.resource_name] = {"status": "OK", "ch_data": ch_data}
         except Exception as e:
-            dev_results[name] = {"status": "FAULTY", "reason": str(e)[:100],
-                                 "model": d.model, "channels": d.channels}
+            dev_results[d.resource_name] = {"status": "ERROR", "reason": str(e)}
 
-    # ── Chassis structure table ──
-    lines.append("## 机箱结构")
-    lines.append("")
-    slot_rows = []
-    device_slots = {d.resource_name: d for d in all_devs}
-    pxi_devices: set[str] = set()
-    for slot in range(1, 19):
-        name = f"PXI1Slot{slot}"
-        if name in dev_results:
-            pxi_devices.add(name)
-            dr = dev_results[name]
-            if dr["status"] == "OK":
-                status = "✓ 正常"
-            else:
-                status = "✗ FAULTY"
-            model = dr.get("model", "PXIe-5160")
-            slot_rows.append([str(slot), name, model, status])
-        elif slot == 1:
-            slot_rows.append([str(slot), "PXI1Slot1", "PXIe Controller", "✓"])
-        else:
-            slot_rows.append([str(slot), name, "(空)", "—"])
-    lines.append(_fmt_table(["插槽", "设备名", "型号", "状态"], slot_rows))
-
-    # Non-PXI devices (separate rows)
-    other_devices = [name for name in dev_results if name not in pxi_devices]
-    if other_devices:
-        for name in sorted(other_devices):
-            dr = dev_results[name]
-            status = "✓ 正常" if dr["status"] == "OK" else "✗ FAULTY"
-            lines.append(f"- **{name}**: {dr.get('model', 'Unknown')} — {status}")
-
-    # ── Measurement table ──
-    lines.append("")
-    lines.append("## 测量结果")
-    lines.append("")
-    lines.append("| 插槽 | CH | 类型 | 频率 | Vpp | RMS | 占空比 | 上升时间 | 下降时间 | 均值 | 最小值 | 最大值 | 采样率 |")
-    lines.append("|------|----|------|------|-----|-----|--------|----------|----------|------|--------|--------|--------|")
-
-    for name in sorted(dev_results.keys()):
-        dr = dev_results[name]
-        slot_num = name.replace("PXI1Slot", "") if "PXI1Slot" in name else name
-        if dr["status"] != "OK":
-            lines.append(f"| {slot_num} | — | ⚠ FAULTY | — | — | — | — | — | — | — | — | — | — |")
-            continue
-        for ch in sorted(dr.get("ch_data", {}).keys()):
-            cd = dr["ch_data"][ch]
-            if isinstance(cd, dict) and "error" in cd:
-                lines.append(f"| {slot_num} | CH{ch} | ❌ ERR | — | — | — | — | — | — | — | — | — | — |")
-            elif cd.signal_type == "periodic":
-                lines.append(
-                    f"| {slot_num} | CH{ch} | 🔵 周期 "
-                    f"| {cd.frequency_hz/1e6:.4f}M | {cd.amplitude_vpp:.3f}V "
-                    f"| {cd.rms_v:.3f}V | {cd.duty_cycle_pct:.0f}% "
-                    f"| {cd.rise_time_sec*1e9:.1f}ns | {cd.fall_time_sec*1e9:.1f}ns "
-                    f"| {cd.mean_v:.3f}V | {cd.min_v:.3f}V | {cd.max_v:.3f}V "
-                    f"| {cd.sample_rate_sps/1e6:.0f}M |"
-                )
-            else:
-                lines.append(
-                    f"| {slot_num} | CH{ch} | ⚪ {cd.signal_type.upper()} "
-                    f"| — | {cd.stats['peak_to_peak']:.3f}V "
-                    f"| {cd.stats['std']:.3f}V | — | — | — "
-                    f"| {cd.mean_v:.3f}V | {cd.min_v:.3f}V | {cd.max_v:.3f}V "
-                    f"| {cd.sample_rate_sps/1e6:.0f}M |"
-                )
+    if summary_rows:
+        lines.append(_fmt_table(header, summary_rows))
 
     # ── Waveform previews for active channels ──
     active_channels = []
@@ -965,12 +936,24 @@ async def _help() -> list[TextContent]:
 | min_sample_rate | 1e6–1.25e9 | >10× signal freq |
 | trigger_type | EDGE | EDGE works for 95% of cases |
 
-### Backends
-- `direct` — real NI hardware (default)
-- `mock` — simulated (no hardware needed)
-- Switch: `python -m niscope_mcp --backend mock`
+### Installation (first time only)
+The server auto-installs the NI hardware driver on first start.
+After that, add this MCP entry to your AI assistant:
+
+**Reasonix Desktop** (`config.json`):
+```json
+"niscope=python -u -m niscope_mcp"
+```
+
+**Claude Desktop / Cursor**:
+```json
+"mcpServers": { "niscope": { "command": "python", "args": ["-u", "-m", "niscope_mcp"] } }
+```
+
+Then **restart the AI assistant**.
 
 ### Troubleshooting
+- **niscope package missing** → auto-installed on first start, or manually: `pip install "niscope-mcp[hardware]"`
 - **FAULTY device** → power-cycle PXI chassis
 - **Timeout** → check trigger source/level; try free-run
 - **Flat waveform** → try larger vertical_range or check connection""".format(backend_name=backend().backend_name)
@@ -983,13 +966,78 @@ def main():
     global _backend
     import asyncio
 
-    parser = argparse.ArgumentParser(description="NI-SCOPE MCP Server")
-    parser.add_argument("--backend", default="direct", choices=["direct", "mock"],
-                        help="Instrument backend (default: direct)")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(
+        description="NI-SCOPE MCP Server — AI-controlled oscilloscope (NI PXIe-516x)",
+        epilog="""
+INSTALLATION STEPS (run once):
+  1. First start:  python -m niscope_mcp
+     - Auto-installs the niscope hardware driver package if missing
+     - Prints the MCP config entry you need to add to your AI assistant
 
-    _backend = get_backend(args.backend)
+  2. Add to Reasonix config (C:\\Users\\<username>\\.reasonix\\config.json):
+     "mcp": [
+       "niscope=python -u -m niscope_mcp"
+     ]
+
+  3. Add to Claude Desktop / Cursor:
+     "mcpServers": {
+       "niscope": {
+         "command": "python",
+         "args": ["-u", "-m", "niscope_mcp"]
+       }
+     }
+
+  4. Restart your AI assistant — the tools will appear automatically.
+
+PREREQUISITES:
+  - Windows OS (NI driver requirement)
+  - NI-SCOPE runtime driver installed from ni.com
+  - NI oscilloscope hardware connected (PXIe-5160 / 5164 / 5110)
+
+TROUBLESHOOTING:
+  - If auto-install fails, run manually:
+      pip install "niscope-mcp[hardware]"
+  - If import fails after install, the NI-SCOPE driver may not be installed
+  - If no devices found, check PXI chassis connection and power cycle
+""")
+
+    # ── Auto-install niscope if missing ──────────────────────────────────
+    import sys
+    from niscope_mcp.backends import register_direct, try_install_niscope
+
+    if not register_direct():
+        log.warning("=" * 60)
+        log.warning("NI-SCOPE hardware driver (niscope) not found.")
+        log.warning("Auto-installing now...")
+        log.warning("=" * 60)
+        if try_install_niscope():
+            log.info("niscope package installed. Starting server...")
+        else:
+            sys.stderr.write("=" * 60 + "\n")
+            sys.stderr.write("FAILED: niscope hardware driver could not be installed.\n")
+            sys.stderr.write("Run: pip install \"niscope-mcp[hardware]\"\n")
+            sys.stderr.write("=" * 60 + "\n")
+            sys.exit(1)
+
+    _backend = get_backend("direct")
     log.info("Backend: %s — ready (lazy device scan on first request)", _backend.backend_name)
+
+    # ── Log MCP config registration instructions (stderr, not stdout) ────
+    log.info("=" * 58)
+    log.info("  NI-SCOPE MCP Server - Installation Complete")
+    log.info("=" * 58)
+    log.info(" [OK] niscope-mcp package + hardware driver installed")
+    log.info("")
+    log.info(" To use this MCP server, register it in your AI assistant config:")
+    log.info("")
+    log.info(" --- Reasonix Desktop (config.json) ---")
+    log.info('   "mcp": ["niscope=python -u -m niscope_mcp"]')
+    log.info("")
+    log.info(" --- Claude Desktop / Cursor ---")
+    log.info('   "mcpServers": { "niscope": { "command": "python", "args": ["-u", "-m", "niscope_mcp"] } }')
+    log.info("")
+    log.info(" Then RESTART the AI assistant.")
+    log.info("=" * 58)
 
     async def run():
         try:
