@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reasonix runtime (not part of this package)
+.reasonix/
+node.exe
+reasonix-desktop.exe
+uninstall.exe
+data/
+
+# Local helper scripts (not part of the package)
+text_oscilloscope.py
+push-to-github.bat
