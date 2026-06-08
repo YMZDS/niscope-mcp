@@ -1,0 +1,7 @@
+# Core — mock backend (no hardware needed)
+mcp>=1.0
+numpy>=1.24
+
+# Optional — NI hardware support (Windows + NI-SCOPE driver)
+# Install with: pip install -e ".[hardware]"
+# niscope>=1.4
