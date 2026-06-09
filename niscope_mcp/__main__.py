@@ -466,13 +466,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             case "help":               return await _help()
             case _: return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
+        import traceback as _tb
         err_str = str(e)
-        if "TopazADCPhaseParityCalibration" in err_str or "Internal Hardware Error" in err_str:
-            resource = arguments.get("resource_name", "")
-            if resource:
-                backend().mark_bad(resource, err_str[:120])
+        resource = arguments.get("resource_name", "")
+        if resource and ("TopazADCPhaseParityCalibration" in err_str or "Internal Hardware Error" in err_str):
+            backend().mark_bad(resource, err_str[:120])
+        # Close stale session so next call gets a fresh one (prevents persistent bad state)
+        if resource and "Failed to retrieve error description" in err_str:
+            try:
+                backend().close_device(resource)
+            except Exception:
+                pass
         log.exception("Error in %s", name)
-        return [TextContent(type="text", text=f"❌ Error: {e}")]
+        tb = _tb.format_exc()
+        tb_short = '\n'.join(tb.strip().split('\n')[-6:])
+        return [TextContent(type="text", text=f"❌ Error: {e}\n\nTraceback (last 6 lines):\n{tb_short}")]
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
@@ -645,10 +653,9 @@ def _format_auto_measure(m) -> TextContent:
 
 
 async def _read_all(args: dict) -> list[TextContent]:
-    r = args["resource_name"]
     timeout = float(args.get("timeout_seconds", 10.0))
     b = backend()
-    b.open_device(r)
+    # Scan first before opening any persistent sessions, to avoid resource conflicts
     devices = b.scan_devices()
 
     if not devices:
@@ -667,7 +674,9 @@ async def _read_all(args: dict) -> list[TextContent]:
     lines.append(_fmt_table(["插槽", "设备名", "型号", "通道", "状态"], chassis_rows))
 
     # ── Acquire ──
-    lines.append("", "## 测量结果", "")
+    lines.append("")
+    lines.append("## 测量结果")
+    lines.append("")
     header = ["CH", "类型", "频率", "Vpp", "占空比", "采样率"]
     summary_rows = []
     dev_results: dict[str, Any] = {}
@@ -915,8 +924,14 @@ def _signal_fingerprint_short(m) -> str:
 
 
 async def _help() -> list[TextContent]:
-    text = """
+    try:
+        backend_name = backend().backend_name
+    except Exception:
+        backend_name = "direct"
+    text = f"""
 ## NI-SCOPE MCP Server — Usage Guide
+
+Backend: **{backend_name}**
 
 ### Quick Start
 1. `list_devices` — find your oscilloscope
@@ -938,16 +953,19 @@ async def _help() -> list[TextContent]:
 
 ### Installation (first time only)
 The server auto-installs the NI hardware driver on first start.
-After that, add this MCP entry to your AI assistant:
+After that, add this MCP entry to your AI assistant.
 
-**Reasonix Desktop** (`config.json`):
+Claude Desktop / Cursor / Proma mcp.json:
 ```json
-"niscope=python -u -m niscope_mcp"
-```
-
-**Claude Desktop / Cursor**:
-```json
-"mcpServers": { "niscope": { "command": "python", "args": ["-u", "-m", "niscope_mcp"] } }
+{{
+  "servers": {{
+    "niscope": {{
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "-m", "niscope_mcp"]
+    }}
+  }}
+}}
 ```
 
 Then **restart the AI assistant**.
@@ -956,7 +974,7 @@ Then **restart the AI assistant**.
 - **niscope package missing** → auto-installed on first start, or manually: `pip install "niscope-mcp[hardware]"`
 - **FAULTY device** → power-cycle PXI chassis
 - **Timeout** → check trigger source/level; try free-run
-- **Flat waveform** → try larger vertical_range or check connection""".format(backend_name=backend().backend_name)
+- **Flat waveform** → try larger vertical_range or check connection"""
     return [TextContent(type="text", text=text)]
 
 
