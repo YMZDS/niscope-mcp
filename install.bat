@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 echo ============================================
-echo  NI-SCOPE MCP Server — Installation
+echo   NI-SCOPE MCP Server v2 — Installation
 echo ============================================
 echo.
 
@@ -30,17 +30,17 @@ if %ERRORLEVEL% NEQ 0 (
     pause
     exit /b 1
 )
-echo   ✅ Package installed
+echo   OK Package installed
 echo.
 
-REM Step 2: Install NI hardware driver (niscope)
+REM Step 2: Install NI hardware driver
 echo [2/3] Installing NI-SCOPE hardware driver (niscope)...
 %PYTHON% -m pip install "niscope-mcp[hardware]"
 if %ERRORLEVEL% EQU 0 (
-    echo   ✅ niscope hardware driver installed
+    echo   OK niscope hardware driver installed
 ) else (
-    echo   ⚠️  niscope hardware driver install failed.
-    echo      Run manually: %PYTHON% -m pip install "niscope-mcp[hardware]"
+    echo   WARNING: niscope hardware driver install failed.
+    echo   Run manually: %PYTHON% -m pip install "niscope-mcp[hardware]"
 )
 echo.
 
@@ -48,28 +48,25 @@ REM Step 3: Print config instructions
 echo [3/3] Installation complete!
 echo.
 echo ============================================
-echo  ✅ niscope-mcp package + hardware driver
+echo   niscope-mcp v2.1 installed
 echo ============================================
 echo.
-echo  IMPORTANT: Add the following MCP entry to your
-echo  AI assistant config, then RESTART the assistant.
+echo   IMPORTANT: Add this MCP entry to your AI assistant
+echo   config, then RESTART the assistant.
 echo.
-echo  --- Reasonix Desktop (config.json) ---
-echo  "mcp": [
-echo    "niscope=%PYTHON% -u -m niscope_mcp"
-echo  ]
+echo   --- Proma / Claude Desktop / Cursor ---
+echo   {
+echo     "servers": {
+echo       "niscope": {
+echo         "type": "stdio",
+echo         "command": "%PYTHON%",
+echo         "args": ["-u", "-m", "niscope_mcp"],
+echo         "enabled": true
+echo       }
+echo     }
+echo   }
 echo.
-echo  --- Claude Desktop / Cursor ---
-echo  "mcpServers": {
-echo    "niscope": {
-echo      "command": "%PYTHON%",
-echo      "args": ["-u", "-m", "niscope_mcp"]
-echo    }
-echo  }
-echo.
-echo ============================================
-echo.
-echo  First start: %PYTHON% -m niscope_mcp
-echo  (auto-installs niscope if missing)
+echo   First start: %PYTHON% -m niscope_mcp
+echo   (auto-installs niscope if missing)
 echo.
 pause

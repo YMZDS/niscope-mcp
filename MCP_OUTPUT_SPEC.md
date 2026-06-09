@@ -1,176 +1,197 @@
-# NI-SCOPE MCP 输出格式规范
+# NI-SCOPE MCP 输出格式规范 v2.1
 
-> 本文档定义 `read_waveform` 和 `read_all_channels` 的输出格式。
-> 所有修改必须严格遵循此规范，确保每次输出结构一致。
-
----
-
-## 1. `read_waveform` — 单通道读取
-
-### 输出结构（固定顺序）
-
-```
-## CH{通道号}  {信号类型}  {采样点数} pts @ {采样率} MS/s
-
-| 参数       | 值          |
-|------------|-------------|
-| 频率       | {值} Hz     |
-| 周期       | {值} ns     |
-| 幅度 (Vpp) | {值} V      |
-| RMS        | {值} V      |
-| 均值       | {±值} V     |
-| 最小值     | {值} V      |
-| 最大值     | {值} V      |
-| 占空比     | {值}%       |
-| 上升时间   | {值} ns     |
-| 下降时间   | {值} ns     |
-| 采样率     | {值} MS/s   |
-
-{波形图}
-
-🔍 {信号分析}
-```
-
-### 规则
-
-- **信号类型**: `PERIODIC` / `DC` / `NOISE`
-- **采样率单位**: MS/s, 保留 1 位小数
-- **DC/NOISE 信号**: 参数表改为"类型/均值/RMS/最小值/最大值/Vpp/采样率"
-- **波形图**: 宽度 100, 高度 16, 含网格线和时间轴
-- **信号分析**: 一行中文摘要，含频率+电压+猜测
+> 定义 `read_waveform`、`measure_waveform`、`read_all_channels` 的输出格式。
+> 所有修改必须严格遵循此规范。
 
 ---
 
-## 2. `read_all_channels` — 全通道读取
+## 1. 公共头部 — 设备列表
 
-### 输出结构（固定顺序）
+所有读取工具（`read_waveform` / `measure_waveform` / `read_all_channels`）输出均以设备列表开头：
 
 ```
-## 机箱结构
+## Device List
 
-| 插槽 | 设备名     | 型号              | 状态     |
-|------|-----------|-------------------|----------|
-| {n}  | PXI1Slot{n} | PXIe Controller | ✓        |
-| {n}  | PXI1Slot{n} | NI PXIe-5160 (2CH) | ✓ 正常   |
-| {n}  | PXI1Slot{n} | NI PXIe-5160 (2CH) | ✗ FAULTY |
-| {n}  | PXI1Slot{n} | (空)             | —        |
-
-## 测量结果
-
-| 插槽 | CH | 类型 | 频率 | Vpp | RMS | 占空比 | 上升时间 | 下降时间 | 均值 | 最小值 | 最大值 | 采样率 |
-|------|----|------|------|-----|-----|--------|----------|----------|------|--------|--------|--------|
-| {n} | CH{n} | 🔵 周期 | {值}M | {值}V | {值}V | {值}% | {值}ns | {值}ns | {值}V | {值}V | {值}V | {值}M |
-| {n} | CH{n} | ⚪ DC   | — | {值}V | {值}V | — | — | — | {值}V | {值}V | {值}V | {值}M |
-| {n} | — | ⚠ FAULTY | — | — | — | — | — | — | — | — | — | — |
-
-## 波型显示: 插槽{n} 通道{n}
-
-| 参数       | 值          |
-|------------|-------------|
-| 频率       | {值} Hz     |
-| 周期       | {值} ns     |
-| 幅度 (Vpp) | {值} V      |
-| RMS        | {值} V      |
-| 均值       | {±值} V     |
-| 最小值     | {值} V      |
-| 最大值     | {值} V      |
-| 占空比     | {值}%       |
-| 上升时间   | {值} ns     |
-| 下降时间   | {值} ns     |
-| 采样率     | {值} MS/s   |
-
-{波形图}
-
-## 信号分析
-
-- **插槽{n} 通道{n}**: {信号摘要} → {分析猜测}
-- **插槽{n} 通道{n}**: DC {值}V → {猜测}
-- **插槽{n}**: ⚠ FAULTY — {错误原因}
+| Slot   | Device     | Model              | Channels | Max SR   | Status    |
+|--------|-----------|--------------------|----------|----------|-----------|
+| Slot 3 | PXI1Slot3 | NI PXIe-5160 (2CH) | 2 CH     | 1.2 GS/s | OK        |
+| Slot 4 | PXI1Slot4 | NI PXIe-5160 (2CH) | 2 CH     | 1.2 GS/s | OK        |
 ```
 
-### 规则
-
-1. **机箱结构表**: 18 个槽位全部列出，空槽显示 `(空)` / `—`
-2. **测量结果表**: 包含 ALL 通道（DC 也列出，占空比/上升/下降填 `—`）
-3. **波型显示**: 仅对 `periodic` 和 `noise` 信号输出，DC 跳过
-4. **每个波形前必须有参数表**: 格式同 `read_waveform`
-5. **信号分析**: 每条一行，格式 `插槽{n} 通道{n}: {数据} → {猜测}`
-6. **FAULTY 设备**: 测量结果表标出，信号分析节写明原因
+- 故障设备显示 `FAULT (原因)`
+- 由 `_format_device_list()` 统一生成
 
 ---
 
-## 3. 通用格式规则
+## 2. `read_waveform` / `measure_waveform` — 单通道
 
-### 数值格式
+```
+## Measurement — CH0
 
-| 参数 | 格式 | 示例 |
-|------|------|------|
-| 频率 | `{:.6g} Hz` | `1e+07 Hz` 或 `10000 Hz` |
-| 周期 | `{:.1f} ns` | `100.0 ns` |
-| 电压 | `{:.4f} V` | `3.0935 V` |
-| 均值电压 | `{:+.4f} V` | `+1.5079 V` (带正负号) |
-| 百分比 | `{:.1f}%` | `50.0%` |
-| 时间(ns) | `{:.1f} ns` | `38.4 ns` |
-| 采样率 | `{:.1f} MS/s` | `104.2 MS/s` |
-| Vpp | `{:.3f}V` (表格) / `{:.4f} V` (参数表) | `3.094V` |
+| Parameter       | Value              |
+|-----------------|--------------------|
+| Frequency       | 10.0000 MHz        |
+| Period          | 100.0 ns           |
+| Amplitude       | 3.3307 Vpp         |
+| Top / Base      | 3.1433 / 0.1038 V  |
+| Duty Cycle      | 47.3%              |
+| Pos / Neg Width | 47.84 / 52.13 ns   |
+| Rise 10-90%     | 29.007 ns          |
+| Fall 10-90%     | 22.412 ns          |
+| Overshoot       | 6.16%              |
+| Undershoot      | 3.42%              |
+| Jitter (RMS)    | 1863.4 ps          |
+| SNR (est.)      | 21.8 dB            |
+| RMS / Mean      | 1.1274 / +1.5395 V |
+| Sample Rate     | 312.5 MS/s         |
+| Signal Levels   | 4 levels detected  |
 
-### 信号类型图标
+{ASCII waveform}
 
-| 类型 | 图标 |
-|------|------|
-| periodic | 🔵 周期 |
-| dc | ⚪ DC |
-| noise | 🟡 噪声 |
-| faulty | ⚠ FAULTY |
-| error | ❌ ERR |
+### Signal Analysis
+- CH0: {signal_fingerprint}
+```
+
+### 参数表规则
+
+**周期性信号** — 显示全部 16 行：
+| # | 参数 | 来源字段 |
+|---|------|---------|
+| 1 | Frequency | `frequency_hz` |
+| 2 | Period | `period_sec` |
+| 3 | Amplitude | `vpp` (Vpp) |
+| 4 | Top / Base | `top_level` / `base_level` |
+| 5 | Duty Cycle | `duty_cycle_pct` |
+| 6 | Pos / Neg Width | `pos_width_ns` / `neg_width_ns` |
+| 7 | Rise 10-90% | `rise_10_90_ns` |
+| 8 | Fall 10-90% | `fall_10_90_ns` |
+| 9 | Overshoot | `overshoot_pct` |
+| 10 | Undershoot | `undershoot_pct` |
+| 11 | Jitter (RMS) | `jitter_ps` |
+| 12 | SNR (est.) | `snr_db` |
+| 13 | RMS / Mean | `rms_v` / `mean_v` |
+| 14 | Sample Rate | `sample_rate_sps` |
+| 15 | Signal Levels | `num_levels` (if > 2) |
+| 16 | Mode | `burst_info` (if `is_burst`) |
+
+**DC/Noise 信号** — 精简表：
+| # | 参数 | 来源 |
+|---|------|------|
+| 1 | Type | `signal_type` |
+| 2 | Mean | `mean_v` |
+| 3 | RMS | `rms_v` |
+| 4 | Min / Max | `min_v` / `max_v` |
+| 5 | Vpp | `stats.peak_to_peak` |
+| 6 | SNR (est.) | `snr_db` |
+| 7 | Sample Rate | `sample_rate_sps` |
 
 ### 波形图
 
-- 宽度: 100 (read_waveform) / 80 (read_all_channels 中)
-- 高度: 16 (read_waveform) / 14 (read_all_channels 中)
-- 必须包含: 连线式波形 `╱╲│─●`、水平网格 `┼┄`、电压标签、时间轴
-- 触发电平: 周期信号自动取中点标记 `╌`
+- 宽度: 100 (`read_waveform`) / 80 (`read_all_channels`)
+- 高度: 16 (`read_waveform`) / 14 (`read_all_channels`)
+- 垂直范围: `base_level - span*0.2` 到 `top_level + span*0.2`
+- 触发电平: 周期信号取 `(top_level + base_level) / 2` 标记 `╌`
+- 连线式波形 `╱╲│─●` + 水平网格 `┼┄` + 电压标签 + 时间轴
 
 ---
 
-## 4. 信号分析规则
+## 3. `read_all_channels` — 全通道
 
-见 `_signal_guess()` 函数。按频率/电压/占空比组合给出中文猜测。
+```
+## Device List
 
-### 常见频率识别
+{_format_device_list(devices)}
 
-| 频率 | 猜测 |
-|------|------|
-| 32.768 kHz | 手表晶振 (RTC) |
-| 1 MHz | 参考时钟 |
-| 8 MHz | MCU 晶振 |
-| 10 MHz | 基准时钟/FPGA 主时钟 |
-| 12 MHz | USB/MCU 晶振 |
-| 24 MHz | USB 全速/STM32 晶振 |
-| 25 MHz | 以太网 PHY 晶振 |
-| 50 MHz | 系统时钟/FPGA |
-| 100 MHz | PCIe/SGMII 参考时钟 |
-| 125 MHz | 以太网 GMII 时钟 |
-| 148.5 MHz | 视频像素时钟 |
+## Measurement Results
 
-### DC 电压识别
+| Device    | CH  | Type     | Frequency/Vpp            | Time |
+|-----------|-----|----------|--------------------------|------|
+| PXI1Slot3 | CH0 | PERIODIC | 10.0000 MHz / 3.3307Vpp  | 1.5s |
+| PXI1Slot3 | CH1 | PERIODIC | 274.6720 MHz / 0.4736Vpp | 2.6s |
 
-| 电压 | 猜测 |
-|------|------|
-| ~0V | GND (接地) |
-| ~3.3V | 3.3V 上拉/空闲逻辑高 |
-| ~5V | 5V 上拉/空闲逻辑高 |
-| ~1.8V | 1.8V 上拉/空闲逻辑高 |
+### Skipped Channels (timeout >10s)  [if any]
+- **PXI1Slot3 CH2**: TIMEOUT after 12s — channel skipped
+
+## CH 3-0
+
+{same per-channel detail as read_waveform}
+
+## CH 3-1
+...
+```
+
+### 汇总表规则
+
+| 列 | 内容 |
+|----|------|
+| Device | `resource_name` |
+| CH | `CH0`-`CH3` |
+| Type | `PERIODIC` / `DC` / `NOISE` / `SKIP` / `ERROR` |
+| Frequency/Vpp | 周期: `freq / Vpp`, DC: `DC meanV`, noise: `noise vppVpp` |
+| Time | `elapsed_sec` |
+
+### 进程清理
+
+输出末尾显示: `No residual processes found — all clean.` 或 `Final cleanup: killed N residual process(es)`
 
 ---
 
-## 5. 代码位置
+## 4. 信号分析格式
 
-| 功能 | 文件 | 函数 |
+```
+{freq} {vpp}Vpp {logic_family} D={duty}% → {guess1}; {guess2}; {guess3}
+```
+
+### 逻辑电平识别 (`_identify_logic`)
+
+| 条件 | 输出 |
+|------|------|
+| top ~3.3V, base ~0V | `3.3V CMOS` |
+| top ~5.0V, base ~0V | `5V TTL` |
+| top ~1.8V, base ~0V | `1.8V LVCMOS` |
+| top ~2.5V, base ~0V | `2.5V LVCMOS` |
+| Vpp < 0.5V | `LVDS/diff.` |
+| Vpp > 10V | `RS-232` or `HV industrial` |
+
+### 信号智能识别 (`_signal_guess`)
+
+按优先级输出最多 4 条猜测，用 `; ` 分隔：
+
+1. **时钟识别** — 32 种常见频率 (32.768kHz ~ 200MHz)
+2. **协议检测** — UART/SPI/I2C/CAN/RS-232
+3. **PWM 检测** — LED/电机/加热器/DC-DC/VRM
+4. **质量分析** — 抖动分级 (excellent <10ps / good <100ps / moderate <500ps / high)，边沿占比警告
+
+---
+
+## 5. 数值格式
+
+| 参数 | 格式 | 示例 |
 |------|------|------|
-| 单通道输出 | `__main__.py` | `_format_auto_measure()` |
+| 频率 | `{:.4f} MHz` / `{:.2f} kHz` / `{:.2f} Hz` | `10.0000 MHz` |
+| 周期 | `{:.1f} ns` | `100.0 ns` |
+| 电压 | `{:.4f} V` / `{:+.4f} V` (均值) | `3.3307 V` / `+1.5462 V` |
+| 百分比 | `{:.1f}%` / `{:.2f}%` (过冲) | `47.3%` |
+| 时间(ns) | `{:.3f} ns` | `29.007 ns` |
+| 抖动 | `{:.1f} ps` | `762.5 ps` |
+| SNR | `{:.1f} dB` | `21.8 dB` |
+| 采样率 | `{:.1f} MS/s` / `{:.1f} GS/s` | `312.5 MS/s` |
+
+---
+
+## 6. 代码位置
+
+| 功能 | 文件 | 函数/位置 |
+|------|------|----------|
+| 设备列表 | `__main__.py` | `_format_device_list()` |
+| 单通道格式化 | `__main__.py` | `_format_auto_measure()` |
+| 参数表 | `__main__.py` | `_build_param_rows()` |
 | 全通道输出 | `__main__.py` | `_read_all()` |
-| 机箱表格 | `__main__.py` | `_read_all()` 前半 |
 | 波形渲染 | `__main__.py` | `_fmt_ascii_waveform()` |
-| 参数表格 | `__main__.py` | `_fmt_table()` |
-| 信号分析 | `__main__.py` | `_signal_guess()` / `_signal_fingerprint()` |
+| 信号分析 | `__main__.py` | `_signal_fingerprint()` / `_signal_guess()` |
+| 逻辑电平 | `__main__.py` | `_identify_logic()` |
+| 协议检测 | `__main__.py` | `_identify_protocol()` |
+| PWM 检测 | `__main__.py` | `_identify_pwm()` |
+| 时钟识别 | `__main__.py` | `_identify_clock()` |
+| 高级测量 | `backends/_worker.py` | `_compute_all()` |
+| Level 检测 | `backends/_worker.py` | `_find_levels()` |
