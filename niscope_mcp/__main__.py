@@ -494,25 +494,22 @@ async def _auto_setup(args: dict) -> list[TextContent]:
 
 
 async def _read_waveform(args: dict) -> list[TextContent]:
-    """Convenience: auto_setup + measure. Best-effort for 'show me the signal'."""
+    """Convenience: auto_setup + single-shot measure. Fast, reliable."""
     r = args["resource_name"]
     ch = args.get("channel", "0")
     timeout = float(args.get("timeout_seconds", 10.0))
     backend().open_device(r)
-    backend().auto_setup(r)
-    backend().commit(r)
-    result = backend().auto_measure(r, ch, timeout)
+    result = backend().auto_measure(r, ch, timeout, preserve_trigger=False)
     return [_format_auto_measure(result)]
 
 
 async def _measure(args: dict) -> list[TextContent]:
-    """Precise: respects user trigger/horizontal config. For 'measure what I set up'."""
+    """Same as read_waveform — single-shot measure for 'show me the signal'."""
     r = args["resource_name"]
     ch = args.get("channel", "0")
     timeout = float(args.get("timeout_seconds", 10.0))
     backend().open_device(r)
-    backend().commit(r)
-    result = backend().auto_measure(r, ch, timeout, preserve_trigger=True)
+    result = backend().auto_measure(r, ch, timeout, preserve_trigger=False)
     return [_format_auto_measure(result)]
 
 

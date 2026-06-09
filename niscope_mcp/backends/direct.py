@@ -218,160 +218,89 @@ class DirectBackend:
 
     def auto_measure(self, resource_name: str, channel: str,
                      timeout: float = 10.0, preserve_trigger: bool = False) -> "AutoMeasureResult":
-        """Adaptive sampling — tries progressively higher rates until the signal is found.
+        """Acquire and measure with minimal latency. Uses auto_setup for reliable triggering.
 
-        Set preserve_trigger=True to keep the user's trigger configuration (for
-        read_waveform after configure_scope). When False (default), uses free-run
-        for maximum compatibility with all signal types.
+        Set preserve_trigger=True to keep the user's configuration.
+        Otherwise calls auto_setup to let the hardware find the signal.
         """
         from .base import AutoMeasureResult
 
         s = self._session(resource_name)
         s.channels[channel].channel_enabled = True
-        # Only switch to free-run if user hasn't set up a trigger
-        if not preserve_trigger:
-            try:
-                s.configure_trigger_immediate()
-            except Exception:
-                pass  # some setups may reject this
         history: list[str] = []
 
-        # Sampling ladder: start fast, go faster if DC
-        rates = [100e6, 250e6, 500e6, 1.25e9]
-        best_freq = 0.0
-        best_samples: np.ndarray | None = None
-        best_dt = 0.0
-        best_n = 0
-        dc_count = 0  # consecutive DC detections for early exit
+        if not preserve_trigger:
+            s.auto_setup()
+        s.horz_min_num_pts = 100000  # fast: 100k points
+        s.commit()
 
-        for sr in rates:
-            npts = min(int(sr * 0.01), 1000000)  # 10ms worth or 1M max
-            s.min_sample_rate = sr
-            s.horz_min_num_pts = npts
-            s.commit()
-
-            try:
-                with s.initiate():
-                    wfms = s.channels[channel].fetch(num_samples=npts, timeout=min(timeout / len(rates), 3.0))
-            except Exception:
-                history.append(f"{sr/1e6:.0f}MS/s: acquisition failed")
-                continue
-
-            data = wfms[0]
-            samples = np.array(data.samples, dtype=np.float64)
-            dt = data.x_increment
-            meas = _compute_measurements(samples, dt)
-            freq = meas.get("frequency_hz", 0.0)
-            num_crossings = meas.get("num_crossings", 0)
-
-            # Determine signal type
-            pp = float(np.max(samples) - np.min(samples))
-            std = float(np.std(samples))
-
-            # Heuristics for real vs fake signal
-            vrange = s.channels[channel].vertical_range  # full scale
-            min_pp = vrange * 0.01  # at least 1% of full scale
-
-            if freq > 1000 and pp > min_pp and num_crossings >= 4:
-                # Check frequency stability across rates
-                if best_freq > 0:
-                    freq_change = abs(freq - best_freq) / max(best_freq, 1.0)
-                    if freq_change > 0.5:  # >50% change → aliasing/noise
-                        sig_type = "noise"
-                    else:
-                        sig_type = "periodic"
-                else:
-                    sig_type = "periodic"
-            elif pp < min_pp:
-                sig_type = "dc"
-            else:
-                sig_type = "noise"
-
-            history.append(
-                f"{sr/1e6:.0f}MS/s: freq={freq/1e6:.3f}MHz Vpp={pp:.3f}V "
-                f"xings={num_crossings} ({sig_type})"
-            )
-
-            if freq > best_freq or best_samples is None:
-                best_freq = freq
-                best_samples = samples
-                best_dt = dt
-                best_n = len(samples)
-
-            if sig_type == "periodic" and sr >= freq * 10:
-                break  # Good enough — 10x oversampling
-
-            if sig_type == "dc":
-                dc_count += 1
-                if dc_count >= 2:
-                    break  # Confirmed DC — no need to go faster
-            elif sig_type == "noise":
-                if best_freq == 0 and sr >= 500e6:
-                    break  # No signal even at 500 MS/s — give up
-
-        # Fallback: use the best capture we got
-        if best_samples is None:
-            s.min_sample_rate = 100e6
+        try:
+            with s.initiate():
+                wfms = s.channels[channel].fetch(num_samples=100000, timeout=min(timeout, 5.0))
+        except Exception as e:
+            # Fallback: try once more with 10k points
             s.horz_min_num_pts = 10000
             s.commit()
             with s.initiate():
                 wfms = s.channels[channel].fetch(num_samples=10000, timeout=timeout)
-            data = wfms[0]
-            best_samples = np.array(data.samples, dtype=np.float64)
-            best_dt = data.x_increment
-            best_n = len(best_samples)
-            best_freq = 0.0
-            history.append("100MS/s: fallback capture")
+            history.append(f"fallback after {e}")
 
-        # Final measurements from best samples
-        meas_final = _compute_measurements(best_samples, best_dt) if best_freq > 0 else {
-            "frequency_hz": 0.0, "period_sec": 0.0, "amplitude_vpp": 0.0,
-            "rms_v": 0.0, "min_v": 0.0, "max_v": 0.0, "mean_v": 0.0,
-            "rise_time_sec": 0.0, "fall_time_sec": 0.0, "duty_cycle_pct": 0.0,
-        }
-
-        # Downsample for transport (keep 32k pts for 256-col hi-res rendering)
-        vlist = [float(v) for v in best_samples]
-        tlist = [float(i * best_dt) for i in range(len(vlist))]
-        if len(tlist) > 32000:
-            step = len(tlist) // 32000
-            tlist = tlist[::step]
-            vlist = vlist[::step]
-
-        pp = float(np.max(best_samples) - np.min(best_samples))
-        std = float(np.std(best_samples))
+        data = wfms[0]
+        samples = np.array(data.samples, dtype=np.float64)
+        dt = data.x_increment
+        meas = _compute_measurements(samples, dt)
+        freq = meas.get("frequency_hz", 0.0)
+        pp = float(np.max(samples) - np.min(samples))
+        std = float(np.std(samples))
         vrange = s.channels[channel].vertical_range
         min_pp = vrange * 0.01
-        if best_freq > 1000 and pp > min_pp:
+
+        if freq > 1000 and pp > min_pp:
             signal_type = "periodic"
         elif pp < min_pp:
             signal_type = "dc"
         else:
             signal_type = "noise"
 
+        history.append(f"{1.0/dt/1e6:.0f}MS/s: freq={freq/1e6:.3f}MHz Vpp={pp:.3f}V ({signal_type})")
+
+        # Downsample for transport (max 2000 pts for fast MCP stdio transfer)
+        vlist = [float(v) for v in samples]
+        tlist = [float(i * dt) for i in range(len(vlist))]
+        if len(tlist) > 2000:
+            step = len(tlist) // 2000
+            tlist = tlist[::step]
+            vlist = vlist[::step]
+
+        meas_final = meas if freq > 0 else {
+            "frequency_hz": 0.0, "period_sec": 0.0, "amplitude_vpp": 0.0,
+            "rms_v": 0.0, "min_v": 0.0, "max_v": 0.0, "mean_v": 0.0,
+            "rise_time_sec": 0.0, "fall_time_sec": 0.0, "duty_cycle_pct": 0.0,
+        }
+
         return AutoMeasureResult(
             channel=channel,
             time=tlist,
             voltage=vlist,
-            raw_samples=best_n,
+            raw_samples=len(samples),
             stats={
-                "min": float(np.min(best_samples)),
-                "max": float(np.max(best_samples)),
-                "mean": float(np.mean(best_samples)),
+                "min": float(np.min(samples)),
+                "max": float(np.max(samples)),
+                "mean": float(np.mean(samples)),
                 "std": float(std),
                 "peak_to_peak": float(pp),
             },
-            frequency_hz=best_freq,
-            period_sec=1.0 / best_freq if best_freq > 0 else 0.0,
+            frequency_hz=freq,
+            period_sec=1.0 / freq if freq > 0 else 0.0,
             amplitude_vpp=meas_final.get("amplitude_vpp", pp),
             rms_v=meas_final.get("rms_v", std),
-            min_v=float(np.min(best_samples)),
-            max_v=float(np.max(best_samples)),
-            mean_v=float(np.mean(best_samples)),
+            min_v=float(np.min(samples)),
+            max_v=float(np.max(samples)),
+            mean_v=float(np.mean(samples)),
             rise_time_sec=meas_final.get("rise_time_sec", 0.0),
             fall_time_sec=meas_final.get("fall_time_sec", 0.0),
             duty_cycle_pct=meas_final.get("duty_cycle_pct", 0.0),
-            sample_rate_sps=1.0 / best_dt if best_dt > 0 else 0.0,
+            sample_rate_sps=1.0 / dt if dt > 0 else 0.0,
             signal_type=signal_type,
             adapt_history=history,
         )
