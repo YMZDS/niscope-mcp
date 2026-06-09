@@ -46,18 +46,18 @@ def try_install_niscope() -> bool:
     """Attempt to pip install the niscope hardware package."""
     import subprocess
     import sys
-    logger.info("Attempting to install niscope package (NI-SCOPE driver)...")
+    logger.info("Installing niscope hardware driver (this may take 30-60s)...")
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "niscope-mcp[hardware]"],
+            [sys.executable, "-m", "pip", "install", "niscope>=1.4"],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0:
             logger.info("niscope package installed successfully")
-            # Try registering again
             return register_direct()
         else:
-            logger.error("pip install failed:\n%s\n%s", result.stdout, result.stderr)
+            logger.error("pip install failed (code %s):\n%s\n%s",
+                         result.returncode, result.stdout, result.stderr)
             return False
     except Exception as e:
         logger.error("Auto-install failed: %s", e)

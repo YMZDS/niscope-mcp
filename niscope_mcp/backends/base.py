@@ -81,45 +81,40 @@ class AcquisitionResult:
 class MeasurementResult:
     """Advanced waveform measurements."""
     channel: str
-    frequency_hz: float
-    period_sec: float
-    amplitude_vpp: float
-    rms_v: float
-    min_v: float
-    max_v: float
-    mean_v: float
-    rise_time_sec: float
-    fall_time_sec: float
-    duty_cycle_pct: float
-    num_samples: int
-    sample_rate_sps: float
+    frequency_hz: float = 0.0
+    period_sec: float = 0.0
+    amplitude_vpp: float = 0.0
+    rms_v: float = 0.0
+    min_v: float = 0.0
+    max_v: float = 0.0
+    mean_v: float = 0.0
+    rise_time_sec: float = 0.0
+    fall_time_sec: float = 0.0
+    duty_cycle_pct: float = 0.0
+    num_samples: int = 0
+    sample_rate_sps: float = 0.0
 
 
 @dataclass
-class AutoMeasureResult:
-    """Combined acquisition + measurement — one-call signal analysis."""
-    channel: str
+class AutoMeasureResult(MeasurementResult):
+    """Combined acquisition + measurement — one-call signal analysis.
+
+    Extends MeasurementResult with waveform data, statistics, and diagnostic info.
+    """
     # Waveform data (downsampled for transport)
-    time: list[float]
-    voltage: list[float]
-    raw_samples: int
+    time: list[float] = field(default_factory=list)
+    voltage: list[float] = field(default_factory=list)
+    raw_samples: int = 0
     # Statistics
-    stats: dict[str, float]
-    # Measurements (may be zero if DC)
-    frequency_hz: float
-    period_sec: float
-    amplitude_vpp: float
-    rms_v: float
-    min_v: float
-    max_v: float
-    mean_v: float
-    rise_time_sec: float
-    fall_time_sec: float
-    duty_cycle_pct: float
-    sample_rate_sps: float
+    stats: dict[str, float] = field(default_factory=dict)
     # Diagnostic
-    signal_type: str          # "periodic", "dc", "noise"
-    adapt_history: list[str]  # sampling attempts log
+    signal_type: str = "dc"          # "periodic", "dc", "noise"
+    adapt_history: list[str] = field(default_factory=list)  # sampling attempts log
+
+    @property
+    def vpp(self) -> float:
+        """Shorthand for amplitude_vpp from stats or measurement."""
+        return self.amplitude_vpp or self.stats.get("peak_to_peak", 0.0)
 
 
 # ── Backend Protocol ──────────────────────────────────────────────────────────
@@ -127,7 +122,8 @@ class AutoMeasureResult:
 class ScopeBackend(Protocol):
     """Protocol for oscilloscope backends.
 
-    Implementations: DirectBackend, GrpcBackend, MockBackend.
+    Implementations: DirectBackend (NI-SCOPE hardware).
+    Extensible for gRPC remote and mock/simulation backends.
     """
 
     backend_name: str

@@ -237,90 +237,6 @@ def _count_periods(points: list[float]) -> int:
     return max(1, crossings // 2)
 
 
-def _fmt_ascii_waveform_braille(voltage: list[float], width: int = 120, height: int = 12,
-                                  vmin: float | None = None, vmax: float | None = None) -> str:
-    """High-resolution Braille waveform — 4×2 dots per character for smooth curves.
-    Kept as fallback for dense signals."""
-    if len(voltage) < 2:
-        return "(insufficient data points)"
-    if vmin is None:
-        vmin = min(voltage)
-    if vmax is None:
-        vmax = max(voltage)
-    span = vmax - vmin
-    if span < 1e-12:
-        span = 0.1; vmax = vmin + 0.1
-
-    if len(voltage) > width * 16:
-        voltage = voltage[:width * 16]
-    step = max(1, len(voltage) // (width * 2))
-    h_pixels = height * 4  # 4 vertical pixels per character row
-
-    # Build pixel grid
-    pixels = [[False] * (width * 2) for _ in range(h_pixels)]
-    for xi in range(width * 2):
-        idx = xi * step
-        if idx < len(voltage):
-            chunk = voltage[idx: idx + step]
-            v = sum(chunk) / len(chunk) if chunk else (vmin + vmax) / 2
-            y_float = (1.0 - (v - vmin) / span) * (h_pixels - 1)
-            yi = max(0, min(h_pixels - 1, int(round(y_float))))
-            pixels[yi][xi] = True
-            # Draw connecting lines (anti-aliased)
-            if xi > 0:
-                prev_idx = (xi - 1) * step
-                if prev_idx < len(voltage):
-                    prev_chunk = voltage[prev_idx: prev_idx + step]
-                    prev_v = sum(prev_chunk) / len(prev_chunk) if prev_chunk else (vmin + vmax) / 2
-                    prev_y_float = (1.0 - (prev_v - vmin) / span) * (h_pixels - 1)
-                    prev_yi = max(0, min(h_pixels - 1, int(round(prev_y_float))))
-                    # Bresenham line
-                    dx = 1; dy = abs(yi - prev_yi)
-                    sy = 1 if yi > prev_yi else -1
-                    err = dx - dy
-                    cx, cy = prev_yi + sy, xi - 1
-                    while cy != xi and cx != yi:
-                        if 0 <= cx < h_pixels and 0 <= cy < width * 2:
-                            pixels[cx][cy] = True
-                        e2 = 2 * err
-                        if e2 > -dy:
-                            err -= dy; cy += 1
-                        if e2 < dx:
-                            err += dx; cx += sy
-
-    # Braille: 2×4 dots per char
-    # Dot numbering: 1=top-left, 2=mid-left, 3=bottom-left, 4=top-right, ...
-    # Unicode: 0x2800 + b1*1 + b2*2 + b3*4 + b4*8 + b5*16 + b6*32 + b7*64 + b8*128
-    dot_offsets = [
-        (0, 0), (0, 1), (0, 2), (1, 0),  # col 0: dots 1-3; col 1: dot 4
-        (1, 1), (1, 2), (0, 3), (1, 3),  # dots 5-6; dots 7-8
-    ]
-    braille_rows = []
-    for cy in range(height):
-        row_chars = []
-        for cx in range(width):
-            code = 0x2800
-            for bit, (dx, dy) in enumerate(dot_offsets):
-                px = cx * 2 + dx
-                py = cy * 4 + dy
-                if 0 <= px < width * 2 and 0 <= py < h_pixels and pixels[py][px]:
-                    code |= (1 << bit)
-            row_chars.append(chr(code))
-        braille_rows.append("".join(row_chars))
-
-    label_width = 9
-    lines = [f"  {vmax:+.3f}V", f"  ┌{'─' * width}┐"]
-    for yi in range(height):
-        v_at = vmax - (yi + 0.5) * span / height
-        if yi % 3 == 0:
-            lines.append(f"{v_at:+.3f}V".rjust(label_width) + f"┤{braille_rows[yi]}│")
-        else:
-            lines.append(" " * label_width + f"│{braille_rows[yi]}│")
-    lines.append(f"  └{'─' * width}┘")
-    lines.append(f"  {vmin:+.3f}V")
-    return "\n".join(lines)
-
-
 def _fmt_status_icon(ok: bool) -> str:
     return "✓ OK" if ok else "✗ FAULT"
 
@@ -578,6 +494,7 @@ async def _auto_setup(args: dict) -> list[TextContent]:
 
 
 async def _read_waveform(args: dict) -> list[TextContent]:
+    """Convenience: auto_setup + measure. Best-effort for 'show me the signal'."""
     r = args["resource_name"]
     ch = args.get("channel", "0")
     timeout = float(args.get("timeout_seconds", 10.0))
@@ -589,7 +506,14 @@ async def _read_waveform(args: dict) -> list[TextContent]:
 
 
 async def _measure(args: dict) -> list[TextContent]:
-    return await _read_waveform(args)
+    """Precise: respects user trigger/horizontal config. For 'measure what I set up'."""
+    r = args["resource_name"]
+    ch = args.get("channel", "0")
+    timeout = float(args.get("timeout_seconds", 10.0))
+    backend().open_device(r)
+    backend().commit(r)
+    result = backend().auto_measure(r, ch, timeout, preserve_trigger=True)
+    return [_format_auto_measure(result)]
 
 
 def _build_param_rows(m) -> list[list[str]]:
@@ -688,13 +612,14 @@ async def _read_all(args: dict) -> list[TextContent]:
         try:
             b.auto_setup(d.resource_name)
             b.commit(d.resource_name)
-            # Read both (or all) channels
+            # Read every channel the device has
             ch_data = {}
-            for i in range(min(d.channels, 2)):  # first 2 channels for speed
+            ch_icons = ["🔵", "🟠", "🟢", "🔴"]
+            for i in range(d.channels):
                 try:
                     m = b.auto_measure(d.resource_name, str(i), timeout)
                     ch_data[str(i)] = m
-                    icon = "🔵" if i == 0 else "🟠"
+                    icon = ch_icons[i] if i < len(ch_icons) else "⚪"
                     f_str = ""
                     if m.signal_type == "periodic":
                         f_mhz = m.frequency_hz / 1e6
@@ -903,25 +828,6 @@ def _signal_fingerprint(m) -> str:
     elif abs(m.max_v - 1.8) < 0.2:
         logic = " 1.8V"
     return f"{f_str} {m.amplitude_vpp:.2f}Vpp{logic} {m.duty_cycle_pct:.0f}% → {guess}"
-
-
-def _signal_fingerprint_short(m) -> str:
-    """One-line signal summary."""
-    if m.signal_type == "dc":
-        return f"DC {m.mean_v:.2f}V — {_signal_guess(m)}"
-    if m.signal_type == "noise":
-        return f"噪声 {m.stats['std']*1000:.0f}mV RMS"
-    f_mhz = m.frequency_hz / 1e6
-    f_str = f"{f_mhz:.4f} MHz" if f_mhz >= 1 else f"{m.frequency_hz/1e3:.2f} kHz"
-    logic = ""
-    if abs(m.max_v - 3.3) < 0.4 and abs(m.min_v) < 0.3:
-        logic = " 3.3V CMOS"
-    elif abs(m.max_v - 5.0) < 0.5 and abs(m.min_v) < 0.3:
-        logic = " 5V TTL"
-    elif abs(m.max_v - 1.8) < 0.2:
-        logic = " 1.8V"
-    return f"{f_str} {m.amplitude_vpp:.2f}Vpp{logic} {m.duty_cycle_pct:.0f}% → {_signal_guess(m)}"
-
 
 async def _help() -> list[TextContent]:
     try:

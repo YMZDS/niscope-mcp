@@ -2,8 +2,8 @@
 """Compatibility wrapper — delegates to niscope_mcp package.
 
 Usage (legacy):
-    python niscope-mcp/server.py                  # direct backend
-    python niscope-mcp/server.py --backend mock   # simulated
+    python niscope-mcp/server.py
+    python niscope-mcp/server.py --check
 
 Preferred:
     python -m niscope_mcp

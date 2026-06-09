@@ -34,12 +34,10 @@ class DirectBackend:
 
     def scan_devices(self) -> list[DeviceInfo]:
         devices: list[DeviceInfo] = []
-        seen: set[str] = set()
+        empty_slots_in_a_row = 0
         for chassis in range(0, 4):
             for slot in range(2, 19):
                 name = f"PXI{chassis}Slot{slot}"
-                if name in seen:
-                    continue
                 try:
                     s = niscope.Session(name, reset_device=False)
                     devices.append(DeviceInfo(
@@ -51,10 +49,14 @@ class DirectBackend:
                         faulty=(name in self._bad_devices),
                         fault_reason="FPGA calibration error" if name in self._bad_devices else "",
                     ))
-                    seen.add(name)
                     s.close()
+                    empty_slots_in_a_row = 0
                 except niscope.errors.DriverError:
-                    pass
+                    empty_slots_in_a_row += 1
+                    # After 4 consecutive empty slots, assume no more devices in this chassis
+                    if empty_slots_in_a_row >= 4 and slot > 5:
+                        break
+            empty_slots_in_a_row = 0
         return devices
 
     def open_device(self, resource_name: str) -> None:
@@ -215,14 +217,23 @@ class DirectBackend:
         )
 
     def auto_measure(self, resource_name: str, channel: str,
-                     timeout: float = 10.0) -> "AutoMeasureResult":
-        """Adaptive sampling — tries progressively higher rates until the signal is found."""
+                     timeout: float = 10.0, preserve_trigger: bool = False) -> "AutoMeasureResult":
+        """Adaptive sampling — tries progressively higher rates until the signal is found.
+
+        Set preserve_trigger=True to keep the user's trigger configuration (for
+        read_waveform after configure_scope). When False (default), uses free-run
+        for maximum compatibility with all signal types.
+        """
         from .base import AutoMeasureResult
-        import time as _time
 
         s = self._session(resource_name)
         s.channels[channel].channel_enabled = True
-        s.configure_trigger_immediate()  # Free-run — VAL_IMMEDIATE not valid as trigger_source string
+        # Only switch to free-run if user hasn't set up a trigger
+        if not preserve_trigger:
+            try:
+                s.configure_trigger_immediate()
+            except Exception:
+                pass  # some setups may reject this
         history: list[str] = []
 
         # Sampling ladder: start fast, go faster if DC
@@ -398,18 +409,18 @@ class DirectBackend:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _to_niscope_enum(enum_cls, value: str):
-    """Convert a string to a niscope enum value, with fallback."""
+    """Convert a string to a niscope enum value, with prefix search and fallback."""
     try:
         return getattr(enum_cls, value)
     except AttributeError:
-        # Try common prefixes
         for prefix in ["VAL_", ""]:
             try:
                 return getattr(enum_cls, f"{prefix}{value}")
             except AttributeError:
                 pass
-        # Return the first enum member as safe fallback
-        return next(iter(enum_cls.__members__.values()))
+        first = next(iter(enum_cls.__members__.values()))
+        log.warning("Unknown enum value %r for %s, falling back to %s", value, enum_cls.__name__, first)
+        return first
 
 
 def _apply_advanced_trigger(session, config: TriggerConfig) -> None:
@@ -445,19 +456,28 @@ def _apply_advanced_trigger(session, config: TriggerConfig) -> None:
 
 
 def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
-    """Compute signal measurements from waveform samples."""
+    """Compute signal measurements from waveform samples.
+
+    Uses (max+min)/2 as the crossing threshold (50% amplitude),
+    which is more robust than mean for non-symmetric waveforms.
+    """
     N = len(samples)
-    mean_val = float(np.mean(samples))
     min_val = float(np.min(samples))
     max_val = float(np.max(samples))
     amplitude = max_val - min_val
+    mean_val = float(np.mean(samples))
     rms = float(np.sqrt(np.mean((samples - mean_val) ** 2)))
 
-    mid = mean_val
-    crossings = []
+    # 50% amplitude threshold — handles non-50% duty cycle correctly
+    mid = (max_val + min_val) / 2.0
+
+    crossings_up = []
+    crossings_down = []
     for i in range(1, N):
         if samples[i - 1] < mid <= samples[i]:
-            crossings.append(i)
+            crossings_up.append(i)
+        elif samples[i - 1] > mid >= samples[i]:
+            crossings_down.append(i)
 
     freq = 0.0
     period = 0.0
@@ -465,8 +485,8 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
     rise_time_s = 0.0
     fall_time_s = 0.0
 
-    if len(crossings) >= 2:
-        periods_sample = np.diff(crossings)
+    if len(crossings_up) >= 2:
+        periods_sample = np.diff(crossings_up)
         avg_period = float(np.mean(periods_sample))
         period = avg_period * dt
         if period > 0:
@@ -474,7 +494,10 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
 
         lo = min_val + 0.1 * amplitude
         hi = min_val + 0.9 * amplitude
-        for ci in crossings:
+
+        # Average rise times across multiple edges for robustness
+        rise_times = []
+        for ci in crossings_up:
             if ci >= 1:
                 rs = ci - 1
                 while rs > 0 and samples[rs] > lo:
@@ -482,32 +505,36 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
                 re = ci
                 while re < N - 1 and samples[re] < hi:
                     re += 1
-                rise_time_s = float((re - rs) * dt)
-                break
+                rise_times.append(float((re - rs) * dt))
+        if rise_times:
+            rise_time_s = float(np.mean(rise_times))
 
-        for i in range(1, N):
-            if samples[i - 1] > mid >= samples[i]:
-                fs = i - 1
+        # Average fall times
+        fall_times = []
+        for ci in crossings_down:
+            if ci < N - 1:
+                fs = ci - 1
                 while fs > 0 and samples[fs] < hi:
                     fs -= 1
-                fe = i
+                fe = ci
                 while fe < N - 1 and samples[fe] > lo:
                     fe += 1
-                fall_time_s = float((fe - fs) * dt)
-                break
+                fall_times.append(float((fe - fs) * dt))
+        if fall_times:
+            fall_time_s = float(np.mean(fall_times))
 
-        if len(crossings) >= 2:
-            first_up = crossings[0]
-            down_cross = None
-            for i in range(first_up + 1, N):
-                if samples[i - 1] > mid >= samples[i]:
-                    down_cross = i
-                    break
-            if down_cross and down_cross > first_up:
-                high_samples = down_cross - first_up
-                total = crossings[1] - crossings[0] if len(crossings) > 1 else N
-                if total > 0:
-                    duty = high_samples / total * 100.0
+        # Duty cycle from first complete period
+        first_up = crossings_up[0]
+        first_down = None
+        for cd in crossings_down:
+            if cd > first_up:
+                first_down = cd
+                break
+        if first_down and len(crossings_up) > 1:
+            high_samples = first_down - first_up
+            total = crossings_up[1] - first_up
+            if total > 0:
+                duty = min(high_samples / total * 100.0, 99.9)
 
     return {
         "frequency_hz": freq,
@@ -520,5 +547,5 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
         "rise_time_sec": rise_time_s,
         "fall_time_sec": fall_time_s,
         "duty_cycle_pct": duty,
-        "num_crossings": len(crossings),
+        "num_crossings": len(crossings_up) + len(crossings_down),
     }

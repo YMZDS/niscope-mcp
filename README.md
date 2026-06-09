@@ -23,26 +23,18 @@ pip install "niscope-mcp[hardware]"    # 安装 NI-SCOPE 硬件驱动
 
 pip install **只是安装了 Python 包**，要让 AI 助手能调用示波器工具，还需要在 AI 助手的配置中注册 MCP 入口。
 
-#### Reasonix Desktop
+#### Proma / Claude Desktop / Cursor
 
-编辑 `C:\Users\<用户名>\.reasonix\config.json`，在 `mcp` 数组中添加：
-
-```json
-{
-  "mcp": [
-    "niscope=python -u -m niscope_mcp"
-  ]
-}
-```
-
-#### Claude Desktop / Cursor
+编辑 MCP 配置文件，添加：
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "niscope": {
+      "type": "stdio",
       "command": "python",
-      "args": ["-u", "-m", "niscope_mcp"]
+      "args": ["-u", "-m", "niscope_mcp"],
+      "enabled": true
     }
   }
 }
