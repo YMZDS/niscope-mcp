@@ -507,18 +507,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
 # ── Handlers ───────────────────────────────────────────────────────────────
 
-async def _list_devices() -> list[TextContent]:
-    devices = backend().scan_devices()
-    if not devices:
-        return [TextContent(type="text", text="No oscilloscopes found.")]
+def _format_device_list(devices) -> str:
+    """Build detailed device table: model, channels, max sample rate, health status."""
     rows = []
     for d in devices:
         sr_gs = d.max_sample_rate / 1e9
         status = _fmt_status_icon(not d.faulty)
         note = f" ({d.fault_reason})" if d.faulty else ""
-        rows.append([d.resource_name, d.model, f"{d.channels} CH", f"{sr_gs:.1f} GS/s", status + note])
-    table = _fmt_table(["Device", "Model", "Channels", "Max SR", "Status"], rows)
-    return [TextContent(type="text", text=f"## Oscilloscope Devices\n\n{table}")]
+        slot = d.resource_name.replace("PXI1Slot", "")
+        if "PXI1Slot" not in d.resource_name:
+            slot = d.resource_name
+        rows.append([f"Slot {slot}", d.resource_name, d.model, f"{d.channels} CH", f"{sr_gs:.1f} GS/s", status + note])
+    return _fmt_table(["Slot", "Device", "Model", "Channels", "Max SR", "Status"], rows)
+
+async def _list_devices() -> list[TextContent]:
+    devices = backend().scan_devices()
+    if not devices:
+        return [TextContent(type="text", text="No oscilloscopes found.")]
+    return [TextContent(type="text", text=f"## Oscilloscope Devices\n\n{_format_device_list(devices)}")]
 
 
 async def _get_config(args: dict) -> list[TextContent]:
@@ -604,16 +610,25 @@ async def _read_waveform(args: dict) -> list[TextContent]:
     r = args["resource_name"]
     ch = args.get("channel", "0")
     timeout = float(args.get("timeout_seconds", 10.0))
+    # Show device list first
+    devices = backend().scan_devices()
+    device_header = f"## Device List\n\n{_format_device_list(devices)}\n"
     result = await asyncio.to_thread(_run_worker, r, ch, timeout)
-    return [_format_worker_result(result)]
+    formatted = _format_worker_result(result)
+    formatted.text = device_header + formatted.text
+    return [formatted]
 
 
 async def _measure(args: dict) -> list[TextContent]:
     r = args["resource_name"]
     ch = args.get("channel", "0")
     timeout = float(args.get("timeout_seconds", 10.0))
+    devices = backend().scan_devices()
+    device_header = f"## Device List\n\n{_format_device_list(devices)}\n"
     result = await asyncio.to_thread(_run_worker, r, ch, timeout)
-    return [_format_worker_result(result)]
+    formatted = _format_worker_result(result)
+    formatted.text = device_header + formatted.text
+    return [formatted]
 
 
 class _ResultWrapper:
@@ -757,16 +772,8 @@ async def _read_all(args: dict) -> list[TextContent]:
     if not devices:
         return [TextContent(type="text", text="No devices found.")]
 
-    # ── Chassis map ──
-    lines = ["## Chassis Map", ""]
-    chassis_rows = []
-    for d in devices:
-        slot = d.resource_name.replace("PXI1Slot", "")
-        if "PXI1Slot" not in d.resource_name:
-            slot = d.resource_name
-        status = "✓" if not d.faulty else "✗ FAULTY"
-        chassis_rows.append([slot, d.resource_name, d.model, f"{d.channels} CH", status])
-    lines.append(_fmt_table(["Slot", "Device", "Model", "Channels", "Status"], chassis_rows))
+    # ── Device list (shown first — always) ──
+    lines = ["## Device List", "", _format_device_list(devices)]
 
     # ── Initial cleanup ──
     killed = _kill_stale_workers()
