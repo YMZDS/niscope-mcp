@@ -370,6 +370,7 @@ identification. One call does everything.""",
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    resource = arguments.get("resource_name", "")
     try:
         match name:
             case "list_devices":      return await _list_devices()
@@ -384,19 +385,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as e:
         import traceback as _tb
         err_str = str(e)
-        resource = arguments.get("resource_name", "")
         if resource and ("TopazADCPhaseParityCalibration" in err_str or "Internal Hardware Error" in err_str):
             backend().mark_bad(resource, err_str[:120])
-        # Close stale session so next call gets a fresh one (prevents persistent bad state)
-        if resource and "Failed to retrieve error description" in err_str:
-            try:
-                backend().close_device(resource)
-            except Exception:
-                pass
         log.exception("Error in %s", name)
         tb = _tb.format_exc()
         tb_short = '\n'.join(tb.strip().split('\n')[-6:])
         return [TextContent(type="text", text=f"❌ Error: {e}\n\nTraceback (last 6 lines):\n{tb_short}")]
+    finally:
+        # Always release device locks so other processes can access hardware
+        if resource:
+            try:
+                backend().close_device(resource)
+            except Exception:
+                pass
 
 
 # ── Handlers ──────────────────────────────────────────────────────────────────

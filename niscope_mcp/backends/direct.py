@@ -64,9 +64,10 @@ class DirectBackend:
             raise niscope.errors.DriverError(
                 -1, f"Device {resource_name} previously marked faulty. PXI power cycle needed."
             )
-        if resource_name not in self._sessions:
-            log.info("Opening persistent session to %s", resource_name)
-            self._sessions[resource_name] = niscope.Session(resource_name, reset_device=False)
+        # Always close any stale session first to avoid device lock
+        self.close_device(resource_name)
+        log.info("Opening session to %s", resource_name)
+        self._sessions[resource_name] = niscope.Session(resource_name, reset_device=False)
 
     def close_device(self, resource_name: str) -> None:
         if resource_name in self._sessions:
