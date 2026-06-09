@@ -1,6 +1,6 @@
-"""DirectBackend — uses the niscope Python package to talk to real NI hardware.
+"""DirectBackend — real NI hardware via the niscope Python package.
 
-Requires: NI-SCOPE driver + niscope pip package installed on the local machine.
+Requires: NI-SCOPE driver + niscope pip package on Windows.
 """
 
 from __future__ import annotations
@@ -9,20 +9,16 @@ import numpy as np
 import niscope
 
 from .base import (
-    ScopeBackend,
-    DeviceInfo,
-    ChannelConfig,
-    TriggerConfig,
-    HorizontalConfig,
-    AcquisitionResult,
-    MeasurementResult,
+    ScopeBackend, DeviceInfo, ChannelConfig, TriggerConfig,
+    HorizontalConfig, AcquisitionResult, MeasurementResult, AutoMeasureResult,
 )
+from typing import Any
 
 log = logging.getLogger("niscope-mcp.direct")
 
 
 class DirectBackend:
-    """Backend that drives real NI oscilloscopes via the niscope Python API."""
+    """Backend that drives real NI oscilloscopes via the niscope API."""
 
     backend_name = "direct"
 
@@ -30,12 +26,12 @@ class DirectBackend:
         self._sessions: dict[str, niscope.Session] = {}
         self._bad_devices: set[str] = set()
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
+    # ── Lifecycle ──────────────────────────────────────────────────────────
 
     def scan_devices(self) -> list[DeviceInfo]:
         devices: list[DeviceInfo] = []
-        empty_slots_in_a_row = 0
-        for chassis in range(0, 4):
+        empty_slots = 0
+        for chassis in range(4):
             for slot in range(2, 19):
                 name = f"PXI{chassis}Slot{slot}"
                 try:
@@ -50,21 +46,19 @@ class DirectBackend:
                         fault_reason="FPGA calibration error" if name in self._bad_devices else "",
                     ))
                     s.close()
-                    empty_slots_in_a_row = 0
+                    empty_slots = 0
                 except niscope.errors.DriverError:
-                    empty_slots_in_a_row += 1
-                    # After 4 consecutive empty slots, assume no more devices in this chassis
-                    if empty_slots_in_a_row >= 4 and slot > 5:
+                    empty_slots += 1
+                    if empty_slots >= 4 and slot > 5:
                         break
-            empty_slots_in_a_row = 0
+            empty_slots = 0
         return devices
 
     def open_device(self, resource_name: str) -> None:
         if resource_name in self._bad_devices:
             raise niscope.errors.DriverError(
-                -1, f"Device {resource_name} previously marked faulty. PXI power cycle needed."
+                -1, f"Device {resource_name} previously marked faulty."
             )
-        # Always close any stale session first to avoid device lock
         self.close_device(resource_name)
         log.info("Opening session to %s", resource_name)
         self._sessions[resource_name] = niscope.Session(resource_name, reset_device=False)
@@ -89,7 +83,7 @@ class DirectBackend:
         self.open_device(resource_name)
         return self._sessions[resource_name]
 
-    # ── Configuration ─────────────────────────────────────────────────────────
+    # ── Configuration ──────────────────────────────────────────────────────
 
     def configure_channel(self, resource_name: str, channel: str, config: ChannelConfig) -> None:
         s = self._session(resource_name)
@@ -97,36 +91,31 @@ class DirectBackend:
         ch.channel_enabled = config.enabled
         ch.vertical_range = config.vertical_range
         ch.vertical_offset = config.vertical_offset
-        ch.vertical_coupling = _to_niscope_enum(niscope.VerticalCoupling, config.vertical_coupling)
+        ch.vertical_coupling = _to_enum(niscope.VerticalCoupling, config.vertical_coupling)
         ch.probe_attenuation = config.probe_attenuation
         if hasattr(ch, 'input_impedance'):
             ch.input_impedance = config.input_impedance
         if config.bandwidth_filter != "FULL" and hasattr(ch, 'bandpass_filter_enabled'):
-            ch.bandpass_filter_enabled = (config.bandwidth_filter != "FULL")
+            ch.bandpass_filter_enabled = True
 
     def configure_trigger(self, resource_name: str, config: TriggerConfig) -> None:
         s = self._session(resource_name)
-        # NI-SCOPE: trigger_source accepts "0", "1", "TRIG" — not "VAL_IMMEDIATE"
         if config.source in ("VAL_IMMEDIATE", "IMMEDIATE"):
             s.configure_trigger_immediate()
         else:
             s.trigger_source = config.source
         s.trigger_level = config.level
-
         slope_map = {"POSITIVE": niscope.TriggerSlope.POSITIVE, "NEGATIVE": niscope.TriggerSlope.NEGATIVE}
         s.trigger_slope = slope_map.get(config.slope, niscope.TriggerSlope.POSITIVE)
-
         if hasattr(s, 'trigger_coupling'):
-            s.trigger_coupling = _to_niscope_enum(niscope.TriggerCoupling, config.coupling)
+            s.trigger_coupling = _to_enum(niscope.TriggerCoupling, config.coupling)
         if hasattr(s, 'trigger_holdoff'):
             s.trigger_holdoff = config.holdoff
-
-        # Advanced trigger type
         if config.type != "EDGE":
             try:
                 _apply_advanced_trigger(s, config)
             except Exception:
-                log.debug("Advanced trigger type %s not supported, falling back to EDGE", config.type)
+                log.debug("Advanced trigger %s not supported, fallback to EDGE", config.type)
                 s.trigger_type = niscope.TriggerType.EDGE
 
     def configure_horizontal(self, resource_name: str, config: HorizontalConfig) -> None:
@@ -138,13 +127,12 @@ class DirectBackend:
         s.horz_enforce_realtime = config.enforce_realtime
 
     def auto_setup(self, resource_name: str) -> None:
-        s = self._session(resource_name)
-        s.auto_setup()
+        self._session(resource_name).auto_setup()
 
     def commit(self, resource_name: str) -> None:
         self._session(resource_name).commit()
 
-    # ── Acquisition ───────────────────────────────────────────────────────────
+    # ── Acquisition ────────────────────────────────────────────────────────
 
     def read_waveform(self, resource_name: str, channel: str,
                       num_samples: int = 10000, timeout: float = 5.0) -> AcquisitionResult:
@@ -152,35 +140,25 @@ class DirectBackend:
         s.channels[channel].channel_enabled = True
         s.horz_min_num_pts = num_samples
         s.commit()
-
         with s.initiate():
             waveforms = s.channels[channel].fetch(num_samples=num_samples, timeout=timeout)
-
         data = waveforms[0]
         samples = np.array(data.samples, dtype=np.float64)
         t0 = data.relative_initial_x
         dt = data.x_increment
-
-        # Downsample to ~2000 points for transport
         time_arr = [float(t0 + i * dt) for i in range(len(samples))]
         volt_arr = [float(v) for v in samples]
         if len(time_arr) > 2000:
             step = len(time_arr) // 2000
             time_arr = time_arr[::step]
             volt_arr = volt_arr[::step]
-
         return AcquisitionResult(
-            channel=channel,
-            time=time_arr,
-            voltage=volt_arr,
-            raw_samples=len(samples),
-            sample_interval=float(dt),
+            channel=channel, time=time_arr, voltage=volt_arr,
+            raw_samples=len(samples), sample_interval=float(dt),
             trigger_offset=float(t0),
             stats={
-                "min": float(np.min(samples)),
-                "max": float(np.max(samples)),
-                "mean": float(np.mean(samples)),
-                "std": float(np.std(samples)),
+                "min": float(np.min(samples)), "max": float(np.max(samples)),
+                "mean": float(np.mean(samples)), "std": float(np.std(samples)),
                 "peak_to_peak": float(np.max(samples) - np.min(samples)),
             },
         )
@@ -191,16 +169,12 @@ class DirectBackend:
         s.channels[channel].channel_enabled = True
         s.horz_min_num_pts = num_samples
         s.commit()
-
         with s.initiate():
             waveforms = s.channels[channel].fetch(num_samples=num_samples, timeout=timeout)
-
         data = waveforms[0]
         samples = np.array(data.samples, dtype=np.float64)
         dt = data.x_increment
-
         meas = _compute_measurements(samples, dt)
-
         return MeasurementResult(
             channel=channel,
             frequency_hz=round(meas.get("frequency_hz", 0.0), 3),
@@ -213,33 +187,22 @@ class DirectBackend:
             rise_time_sec=round(meas.get("rise_time_sec", 0.0), 9),
             fall_time_sec=round(meas.get("fall_time_sec", 0.0), 9),
             duty_cycle_pct=round(meas.get("duty_cycle_pct", 0.0), 2),
-            num_samples=len(samples),
-            sample_rate_sps=round(1.0 / dt, 1),
+            num_samples=len(samples), sample_rate_sps=round(1.0 / dt, 1),
         )
 
     def auto_measure(self, resource_name: str, channel: str,
-                     timeout: float = 10.0, preserve_trigger: bool = False) -> "AutoMeasureResult":
-        """Acquire and measure with minimal latency. Uses auto_setup for reliable triggering.
-
-        Set preserve_trigger=True to keep the user's configuration.
-        Otherwise calls auto_setup to let the hardware find the signal.
-        """
-        from .base import AutoMeasureResult
-
+                     timeout: float = 10.0, preserve_trigger: bool = False) -> AutoMeasureResult:
         s = self._session(resource_name)
         s.channels[channel].channel_enabled = True
         history: list[str] = []
-
         if not preserve_trigger:
-            s.auto_setup()
-        s.horz_min_num_pts = 100000  # fast: 100k points
+            s.configure_trigger_immediate()
+        s.horz_min_num_pts = 100000
         s.commit()
-
         try:
             with s.initiate():
                 wfms = s.channels[channel].fetch(num_samples=100000, timeout=min(timeout, 5.0))
         except Exception as e:
-            # Fallback: try once more with 10k points
             s.horz_min_num_pts = 10000
             s.commit()
             with s.initiate():
@@ -255,17 +218,14 @@ class DirectBackend:
         std = float(np.std(samples))
         vrange = s.channels[channel].vertical_range
         min_pp = vrange * 0.01
-
         if freq > 1000 and pp > min_pp:
             signal_type = "periodic"
         elif pp < min_pp:
             signal_type = "dc"
         else:
             signal_type = "noise"
-
         history.append(f"{1.0/dt/1e6:.0f}MS/s: freq={freq/1e6:.3f}MHz Vpp={pp:.3f}V ({signal_type})")
 
-        # Downsample for transport (max 2000 pts for fast MCP stdio transfer)
         vlist = [float(v) for v in samples]
         tlist = [float(i * dt) for i in range(len(vlist))]
         if len(tlist) > 2000:
@@ -278,39 +238,27 @@ class DirectBackend:
             "rms_v": 0.0, "min_v": 0.0, "max_v": 0.0, "mean_v": 0.0,
             "rise_time_sec": 0.0, "fall_time_sec": 0.0, "duty_cycle_pct": 0.0,
         }
-
         return AutoMeasureResult(
-            channel=channel,
-            time=tlist,
-            voltage=vlist,
-            raw_samples=len(samples),
-            stats={
-                "min": float(np.min(samples)),
-                "max": float(np.max(samples)),
-                "mean": float(np.mean(samples)),
-                "std": float(std),
-                "peak_to_peak": float(pp),
-            },
-            frequency_hz=freq,
-            period_sec=1.0 / freq if freq > 0 else 0.0,
+            channel=channel, time=tlist, voltage=vlist, raw_samples=len(samples),
+            stats={"min": float(np.min(samples)), "max": float(np.max(samples)),
+                   "mean": float(np.mean(samples)), "std": float(std),
+                   "peak_to_peak": float(pp)},
+            frequency_hz=freq, period_sec=1.0 / freq if freq > 0 else 0.0,
             amplitude_vpp=meas_final.get("amplitude_vpp", pp),
             rms_v=meas_final.get("rms_v", std),
-            min_v=float(np.min(samples)),
-            max_v=float(np.max(samples)),
+            min_v=float(np.min(samples)), max_v=float(np.max(samples)),
             mean_v=float(np.mean(samples)),
             rise_time_sec=meas_final.get("rise_time_sec", 0.0),
             fall_time_sec=meas_final.get("fall_time_sec", 0.0),
             duty_cycle_pct=meas_final.get("duty_cycle_pct", 0.0),
             sample_rate_sps=1.0 / dt if dt > 0 else 0.0,
-            signal_type=signal_type,
-            adapt_history=history,
+            signal_type=signal_type, adapt_history=history,
         )
 
-    def get_current_config(self, resource_name: str) -> dict:
+    def get_current_config(self, resource_name: str) -> dict[str, Any]:
         s = self._session(resource_name)
         config: dict[str, Any] = {
-            "resource_name": resource_name,
-            "model": s.instrument_model,
+            "resource_name": resource_name, "model": s.instrument_model,
             "channels": {},
             "horizontal": {
                 "sample_rate_sps": s.min_sample_rate,
@@ -318,8 +266,7 @@ class DirectBackend:
                 "actual_sample_rate_sps": getattr(s, 'horz_sample_rate', 0),
             },
             "trigger": {
-                "source": s.trigger_source,
-                "level_v": s.trigger_level,
+                "source": s.trigger_source, "level_v": s.trigger_level,
                 "slope": str(s.trigger_slope),
             },
         }
@@ -336,10 +283,9 @@ class DirectBackend:
         return config
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-def _to_niscope_enum(enum_cls, value: str):
-    """Convert a string to a niscope enum value, with prefix search and fallback."""
+def _to_enum(enum_cls, value: str):
     try:
         return getattr(enum_cls, value)
     except AttributeError:
@@ -349,35 +295,32 @@ def _to_niscope_enum(enum_cls, value: str):
             except AttributeError:
                 pass
         first = next(iter(enum_cls.__members__.values()))
-        log.warning("Unknown enum value %r for %s, falling back to %s", value, enum_cls.__name__, first)
+        log.warning("Unknown enum %r for %s, fallback to %s", value, enum_cls.__name__, first)
         return first
 
 
 def _apply_advanced_trigger(session, config: TriggerConfig) -> None:
-    """Apply non-EDGE trigger types."""
     ttype = config.type.upper()
     if ttype == "WINDOW":
         session.configure_trigger_window(
             config.source, config.window_low, config.window_high,
-            _to_niscope_enum(niscope.TriggerWindowMode, "ENTERING")
+            _to_enum(niscope.TriggerWindowMode, "ENTERING"),
         )
     elif ttype == "RUNT":
         session.configure_trigger_runt(
             config.source, config.runt_low, config.runt_high,
-            _to_niscope_enum(niscope.RuntPolarity, config.runt_polarity)
+            _to_enum(niscope.RuntPolarity, config.runt_polarity),
         )
     elif ttype == "WIDTH":
         session.configure_trigger_width(
-            config.source, config.level,
-            config.width_low, config.width_high,
-            _to_niscope_enum(niscope.WidthCondition, config.width_condition),
-            _to_niscope_enum(niscope.WidthPolarity, config.width_polarity)
+            config.source, config.level, config.width_low, config.width_high,
+            _to_enum(niscope.WidthCondition, config.width_condition),
+            _to_enum(niscope.WidthPolarity, config.width_polarity),
         )
     elif ttype == "GLITCH":
         session.configure_trigger_glitch(
-            config.source, config.level,
-            config.width_low,
-            _to_niscope_enum(niscope.GlitchPolarity, config.width_polarity)
+            config.source, config.level, config.width_low,
+            _to_enum(niscope.GlitchPolarity, config.width_polarity),
         )
     elif ttype == "DIGITAL":
         session.configure_trigger_digital(config.source)
@@ -386,46 +329,31 @@ def _apply_advanced_trigger(session, config: TriggerConfig) -> None:
 
 
 def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
-    """Compute signal measurements from waveform samples.
-
-    Uses (max+min)/2 as the crossing threshold (50% amplitude),
-    which is more robust than mean for non-symmetric waveforms.
-    """
     N = len(samples)
     min_val = float(np.min(samples))
     max_val = float(np.max(samples))
     amplitude = max_val - min_val
     mean_val = float(np.mean(samples))
     rms = float(np.sqrt(np.mean((samples - mean_val) ** 2)))
-
-    # 50% amplitude threshold — handles non-50% duty cycle correctly
     mid = (max_val + min_val) / 2.0
 
-    crossings_up = []
-    crossings_down = []
+    crossings_up, crossings_down = [], []
     for i in range(1, N):
         if samples[i - 1] < mid <= samples[i]:
             crossings_up.append(i)
         elif samples[i - 1] > mid >= samples[i]:
             crossings_down.append(i)
 
-    freq = 0.0
-    period = 0.0
-    duty = 0.0
-    rise_time_s = 0.0
-    fall_time_s = 0.0
+    freq = 0.0; period = 0.0; duty = 0.0
+    rise_time_s = 0.0; fall_time_s = 0.0
 
     if len(crossings_up) >= 2:
-        periods_sample = np.diff(crossings_up)
-        avg_period = float(np.mean(periods_sample))
+        avg_period = float(np.mean(np.diff(crossings_up)))
         period = avg_period * dt
         if period > 0:
             freq = 1.0 / period
-
         lo = min_val + 0.1 * amplitude
         hi = min_val + 0.9 * amplitude
-
-        # Average rise times across multiple edges for robustness
         rise_times = []
         for ci in crossings_up:
             if ci >= 1:
@@ -438,8 +366,6 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
                 rise_times.append(float((re - rs) * dt))
         if rise_times:
             rise_time_s = float(np.mean(rise_times))
-
-        # Average fall times
         fall_times = []
         for ci in crossings_down:
             if ci < N - 1:
@@ -452,14 +378,8 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
                 fall_times.append(float((fe - fs) * dt))
         if fall_times:
             fall_time_s = float(np.mean(fall_times))
-
-        # Duty cycle from first complete period
         first_up = crossings_up[0]
-        first_down = None
-        for cd in crossings_down:
-            if cd > first_up:
-                first_down = cd
-                break
+        first_down = next((cd for cd in crossings_down if cd > first_up), None)
         if first_down and len(crossings_up) > 1:
             high_samples = first_down - first_up
             total = crossings_up[1] - first_up
@@ -467,15 +387,8 @@ def _compute_measurements(samples: np.ndarray, dt: float) -> dict:
                 duty = min(high_samples / total * 100.0, 99.9)
 
     return {
-        "frequency_hz": freq,
-        "period_sec": period,
-        "amplitude_vpp": amplitude,
-        "rms_v": rms,
-        "min_v": min_val,
-        "max_v": max_val,
-        "mean_v": mean_val,
-        "rise_time_sec": rise_time_s,
-        "fall_time_sec": fall_time_s,
-        "duty_cycle_pct": duty,
-        "num_crossings": len(crossings_up) + len(crossings_down),
+        "frequency_hz": freq, "period_sec": period, "amplitude_vpp": amplitude,
+        "rms_v": rms, "min_v": min_val, "max_v": max_val, "mean_v": mean_val,
+        "rise_time_sec": rise_time_s, "fall_time_sec": fall_time_s,
+        "duty_cycle_pct": duty, "num_crossings": len(crossings_up) + len(crossings_down),
     }

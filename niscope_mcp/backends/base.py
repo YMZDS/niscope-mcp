@@ -1,11 +1,9 @@
-"""ScopeBackend protocol — typed interface for oscilloscope backends."""
+"""Data models and ScopeBackend protocol for oscilloscope backends."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, Any
 
-
-# ── Data types ────────────────────────────────────────────────────────────────
 
 @dataclass
 class DeviceInfo:
@@ -13,41 +11,38 @@ class DeviceInfo:
     resource_name: str
     model: str
     channels: int
-    max_sample_rate: float       # samples/sec
-    max_input_frequency: float   # Hz
+    max_sample_rate: float
+    max_input_frequency: float
     faulty: bool = False
     fault_reason: str = ""
 
 
 @dataclass
 class ChannelConfig:
-    """Per-channel configuration (read + write)."""
+    """Per-channel configuration."""
     enabled: bool = False
-    vertical_range: float = 5.0         # V peak-to-peak
-    vertical_offset: float = 0.0        # V
-    vertical_coupling: str = "DC"       # AC, DC, GND
+    vertical_range: float = 5.0          # Vpp
+    vertical_offset: float = 0.0         # V
+    vertical_coupling: str = "DC"        # AC, DC, GND
     probe_attenuation: float = 1.0
-    input_impedance: float = 1e6        # ohms (50.0 or 1e6)
-    bandwidth_filter: str = "FULL"      # FULL, 20MHz, 100MHz, 200MHz (device-dependent)
+    input_impedance: float = 1e6         # ohms (50 or 1e6)
+    bandwidth_filter: str = "FULL"       # FULL, 20MHZ, 100MHZ, 200MHZ
 
 
 @dataclass
 class TriggerConfig:
-    """Trigger settings (read + write)."""
-    source: str = "VAL_IMMEDIATE"       # channel name, VAL_EXTERNAL, VAL_IMMEDIATE
-    level: float = 0.0                  # V
-    slope: str = "POSITIVE"             # POSITIVE, NEGATIVE
-    coupling: str = "DC"                # AC, DC, HF_REJECT, LF_REJECT
-    holdoff: float = 0.0                # seconds
-    type: str = "EDGE"                  # EDGE, WINDOW, RUNT, WIDTH, GLITCH, DIGITAL, SOFTWARE
-    # Window trigger extras
+    """Trigger settings."""
+    source: str = "VAL_IMMEDIATE"
+    level: float = 0.0
+    slope: str = "POSITIVE"
+    coupling: str = "DC"
+    holdoff: float = 0.0
+    type: str = "EDGE"
     window_low: float = 0.0
     window_high: float = 0.0
-    # Runt trigger extras
     runt_low: float = 0.0
     runt_high: float = 0.0
     runt_polarity: str = "POSITIVE"
-    # Width/Glitch extras
     width_condition: str = "WITHIN"
     width_low: float = 0.0
     width_high: float = 1e-6
@@ -56,25 +51,25 @@ class TriggerConfig:
 
 @dataclass
 class HorizontalConfig:
-    """Horizontal / timing settings (read + write)."""
-    min_sample_rate: float = 1e6        # samples/sec
+    """Horizontal / timing settings."""
+    min_sample_rate: float = 1e6
     min_num_pts: int = 10000
     num_records: int = 1
-    ref_position: float = 50.0          # percent
+    ref_position: float = 50.0
     enforce_realtime: bool = True
-    acquisition_type: str = "NORMAL"    # NORMAL, FLEX_RES, DDC
+    acquisition_type: str = "NORMAL"
 
 
 @dataclass
 class AcquisitionResult:
-    """Result of a single-channel acquisition."""
+    """Single-channel acquisition result."""
     channel: str
-    time: list[float]           # time axis (seconds), downsampled if needed
-    voltage: list[float]        # voltage axis (volts), downsampled if needed
-    raw_samples: int             # actual number of points acquired
-    sample_interval: float       # seconds between samples
-    trigger_offset: float        # seconds from trigger to first sample
-    stats: dict[str, float]      # min, max, mean, std, peak_to_peak
+    time: list[float]
+    voltage: list[float]
+    raw_samples: int
+    sample_interval: float
+    trigger_offset: float
+    stats: dict[str, float]
 
 
 @dataclass
@@ -97,97 +92,37 @@ class MeasurementResult:
 
 @dataclass
 class AutoMeasureResult(MeasurementResult):
-    """Combined acquisition + measurement — one-call signal analysis.
-
-    Extends MeasurementResult with waveform data, statistics, and diagnostic info.
-    """
-    # Waveform data (downsampled for transport)
+    """Combined acquisition + measurement result."""
     time: list[float] = field(default_factory=list)
     voltage: list[float] = field(default_factory=list)
     raw_samples: int = 0
-    # Statistics
     stats: dict[str, float] = field(default_factory=dict)
-    # Diagnostic
-    signal_type: str = "dc"          # "periodic", "dc", "noise"
-    adapt_history: list[str] = field(default_factory=list)  # sampling attempts log
+    signal_type: str = "dc"
+    adapt_history: list[str] = field(default_factory=list)
 
     @property
     def vpp(self) -> float:
-        """Shorthand for amplitude_vpp from stats or measurement."""
         return self.amplitude_vpp or self.stats.get("peak_to_peak", 0.0)
 
 
-# ── Backend Protocol ──────────────────────────────────────────────────────────
-
 class ScopeBackend(Protocol):
-    """Protocol for oscilloscope backends.
-
-    Implementations: DirectBackend (NI-SCOPE hardware).
-    Extensible for gRPC remote and mock/simulation backends.
-    """
+    """Protocol for oscilloscope backends."""
 
     backend_name: str
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────
-
-    def scan_devices(self) -> list[DeviceInfo]:
-        """Discover all connected/available oscilloscopes."""
-        ...
-
-    def open_device(self, resource_name: str) -> None:
-        """Acquire (or re-use) a persistent session to a device."""
-        ...
-
-    def close_device(self, resource_name: str) -> None:
-        """Release a device session."""
-        ...
-
-    def close_all(self) -> None:
-        """Release all open sessions."""
-        ...
-
-    # ── Configuration ─────────────────────────────────────────────────────
-
-    def configure_channel(self, resource_name: str, channel: str, config: ChannelConfig) -> None:
-        """Apply per-channel settings."""
-        ...
-
-    def configure_trigger(self, resource_name: str, config: TriggerConfig) -> None:
-        """Apply trigger settings."""
-        ...
-
-    def configure_horizontal(self, resource_name: str, config: HorizontalConfig) -> None:
-        """Apply horizontal/timing settings."""
-        ...
-
-    def auto_setup(self, resource_name: str) -> None:
-        """Auto-configure vertical, horizontal, and trigger."""
-        ...
-
-    def commit(self, resource_name: str) -> None:
-        """Commit all pending configuration to hardware."""
-        ...
-
-    # ── Acquisition ───────────────────────────────────────────────────────
-
+    def scan_devices(self) -> list[DeviceInfo]: ...
+    def open_device(self, resource_name: str) -> None: ...
+    def close_device(self, resource_name: str) -> None: ...
+    def close_all(self) -> None: ...
+    def configure_channel(self, resource_name: str, channel: str, config: ChannelConfig) -> None: ...
+    def configure_trigger(self, resource_name: str, config: TriggerConfig) -> None: ...
+    def configure_horizontal(self, resource_name: str, config: HorizontalConfig) -> None: ...
+    def auto_setup(self, resource_name: str) -> None: ...
+    def commit(self, resource_name: str) -> None: ...
     def read_waveform(self, resource_name: str, channel: str,
-                      num_samples: int = 10000, timeout: float = 5.0) -> AcquisitionResult:
-        """Acquire a single waveform from one channel."""
-        ...
-
+                      num_samples: int = 10000, timeout: float = 5.0) -> AcquisitionResult: ...
     def measure_waveform(self, resource_name: str, channel: str,
-                         num_samples: int = 100000, timeout: float = 5.0) -> MeasurementResult:
-        """Acquire and compute advanced measurements."""
-        ...
-
+                         num_samples: int = 100000, timeout: float = 5.0) -> MeasurementResult: ...
     def auto_measure(self, resource_name: str, channel: str,
-                     timeout: float = 10.0) -> AutoMeasureResult:
-        """Adaptive acquisition: tries multiple sample rates to find the signal,
-        returns waveform + statistics + measurements in one call."""
-        ...
-
-    # ── State read-back ───────────────────────────────────────────────────
-
-    def get_current_config(self, resource_name: str) -> dict[str, Any]:
-        """Return full current configuration as a dict (for sync with InstrumentStudio)."""
-        ...
+                     timeout: float = 10.0) -> AutoMeasureResult: ...
+    def get_current_config(self, resource_name: str) -> dict[str, Any]: ...
